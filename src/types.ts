@@ -1,6 +1,26 @@
+import type { TtsVoiceName } from './utils/ttsText';
+
 export type KnowledgeLevel = 'adaptive' | 'beginner' | 'intermediate' | 'advanced';
 export type ResponseSpeed = 'standard' | 'fast';
 export type ResearchMode = 'qa' | 'research' | 'learn' | 'summarize' | 'analyze';
+export type AppTheme = 'dark' | 'light' | 'system';
+export type MessageFeedback = 'up' | 'down' | null;
+
+export type ResearchModeId =
+  | 'quick'
+  | 'deep'
+  | 'academic'
+  | 'basics'
+  | 'compare'
+  | 'report';
+
+export interface UserSettings {
+  theme: AppTheme;
+  defaultLevel: KnowledgeLevel;
+  defaultResponseSpeed: ResponseSpeed;
+  defaultSearchGrounding: boolean;
+  ttsVoice: TtsVoiceName;
+}
 
 export type SpecialCommandName =
   | '/learn'
@@ -97,6 +117,7 @@ export interface ChatMessage {
   groundingNote?: string;
   groundingNotice?: string;
   responseSpeed?: ResponseSpeed;
+  feedback?: MessageFeedback;
   isStreaming?: boolean;
   error?: string;
 }
@@ -108,6 +129,7 @@ export interface TopicSession {
   searchGrounding: boolean;
   responseSpeed?: ResponseSpeed;
   activeMode?: ResearchMode;
+  researchModeId?: ResearchModeId;
   knowledgeMap: TopicKnowledgeStructure;
   exploredItems: string[];
   messages: ChatMessage[];

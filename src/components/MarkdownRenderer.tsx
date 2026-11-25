@@ -67,6 +67,11 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
           code: ({ className, children }) => (
             <CodeBlock className={className}>{children}</CodeBlock>
           ),
+          table: ({ children }) => (
+            <div className="my-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+              <table>{children}</table>
+            </div>
+          ),
           a: ({ href, children }) => {
             const safeHref =
               href && (href.startsWith('http://') || href.startsWith('https://'))

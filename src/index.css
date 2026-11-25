@@ -9,14 +9,19 @@
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
   }
 
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
   body {
     font-family: var(--font-sans);
-    background-color: #FAF9F6;
-    color: #18181B;
+    background-color: #F8FAFC;
+    color: #0F172A;
   }
 
   html.dark body {
-    background-color: #090D16;
+    background-color: #060913;
     color: #E2E8F0;
   }
 
@@ -33,11 +38,53 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Lightweight ambient backdrop utility */
+.ambient-glow {
+  background: radial-gradient(
+    ellipse 70% 55% at 50% 0%,
+    rgba(59, 130, 246, 0.14),
+    rgba(139, 92, 246, 0.08) 55%,
+    transparent 80%
+  );
+}
+
+html.dark .ambient-glow {
+  background: radial-gradient(
+    ellipse 70% 55% at 50% 0%,
+    rgba(59, 130, 246, 0.2),
+    rgba(139, 92, 246, 0.12) 55%,
+    transparent 80%
+  );
+}
+
+/* Custom thin scrollbars matching dark navy / light slate surface */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.5);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.65);
+}
+
 /* Editorial Prose Styling for Expert Markdown Output */
 .expert-prose {
   font-size: 0.96875rem;
-  line-height: 1.7;
-  color: #1F2937;
+  line-height: 1.74;
+  color: #1E293B;
 }
 
 html.dark .expert-prose {
@@ -49,7 +96,7 @@ html.dark .expert-prose {
 .expert-prose h3,
 .expert-prose h4 {
   font-family: var(--font-display);
-  color: #111827;
+  color: #0F172A;
   font-weight: 600;
   letter-spacing: -0.015em;
   margin-top: 1.5rem;
@@ -71,11 +118,11 @@ html.dark .expert-prose h4 {
 }
 
 .expert-prose h1 { font-size: 1.375rem; }
-.expert-prose h2 { font-size: 1.1875rem; padding-bottom: 0.375rem; border-bottom: 1px solid #EAE7E0; }
+.expert-prose h2 { font-size: 1.1875rem; padding-bottom: 0.375rem; border-bottom: 1px solid #E2E8F0; }
 .expert-prose h3 { font-size: 1.03125rem; }
 
 html.dark .expert-prose h2 {
-  border-bottom-color: #1E293B;
+  border-bottom-color: rgba(30, 41, 59, 0.9);
 }
 
 .expert-prose p {
@@ -100,16 +147,12 @@ html.dark .expert-prose h2 {
 }
 
 .expert-prose li::marker {
-  color: #6B7280;
-}
-
-html.dark .expert-prose li::marker {
   color: #64748B;
 }
 
 .expert-prose strong {
   font-weight: 600;
-  color: #111827;
+  color: #0F172A;
 }
 
 html.dark .expert-prose strong {
@@ -119,14 +162,14 @@ html.dark .expert-prose strong {
 .expert-prose blockquote {
   margin: 1rem 0;
   padding: 0.75rem 1rem;
-  background-color: #F4F2EC;
-  border: 1px solid #E5E2DC;
-  border-radius: 0.5rem;
-  color: #374151;
+  background-color: #F1F5F9;
+  border: 1px solid #E2E8F0;
+  border-radius: 0.75rem;
+  color: #334155;
 }
 
 html.dark .expert-prose blockquote {
-  background-color: #111827;
+  background-color: #0B1120;
   border-color: #1E293B;
   color: #CBD5E1;
 }
@@ -134,33 +177,24 @@ html.dark .expert-prose blockquote {
 .expert-prose table {
   width: 100%;
   border-collapse: collapse;
-  margin: 1rem 0;
+  margin: 0;
   font-size: 0.875rem;
-  border: 1px solid #E5E2DC;
-  border-radius: 0.5rem;
-  overflow: hidden;
-  display: block;
-  overflow-x: auto;
-}
-
-html.dark .expert-prose table {
-  border-color: #1E293B;
 }
 
 .expert-prose thead {
-  background-color: #F4F2EC;
+  background-color: #F1F5F9;
 }
 
 html.dark .expert-prose thead {
-  background-color: #111827;
+  background-color: #0B1120;
 }
 
 .expert-prose th {
   text-align: left;
   padding: 0.625rem 0.875rem;
   font-weight: 600;
-  color: #111827;
-  border-bottom: 1px solid #E5E2DC;
+  color: #0F172A;
+  border-bottom: 1px solid #E2E8F0;
 }
 
 html.dark .expert-prose th {
@@ -170,7 +204,7 @@ html.dark .expert-prose th {
 
 .expert-prose td {
   padding: 0.5625rem 0.875rem;
-  border-bottom: 1px solid #EFECE6;
+  border-bottom: 1px solid #F1F5F9;
   vertical-align: top;
 }
 
@@ -183,7 +217,7 @@ html.dark .expert-prose td {
 }
 
 .expert-prose a {
-  color: #1E40AF;
+  color: #2563EB;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -193,7 +227,7 @@ html.dark .expert-prose a {
 }
 
 .expert-prose a:hover {
-  color: #1E3A8A;
+  color: #1D4ED8;
 }
 
 html.dark .expert-prose a:hover {
@@ -202,32 +236,28 @@ html.dark .expert-prose a:hover {
 
 .expert-prose :not(pre) > code {
   font-size: 0.84em;
-  background-color: #F2EFE9;
-  color: #1E3A8A;
+  background-color: #F1F5F9;
+  color: #1E40AF;
   padding: 0.125rem 0.375rem;
-  border-radius: 0.25rem;
-  border: 1px solid #E5E2DC;
+  border-radius: 0.3rem;
+  border: 1px solid #E2E8F0;
 }
 
 html.dark .expert-prose :not(pre) > code {
-  background-color: #1E293B;
+  background-color: #161F33;
   color: #93C5FD;
-  border-color: #334155;
+  border-color: #27344E;
 }
 
 .expert-prose pre {
   margin: 1rem 0;
   padding: 0.875rem 1rem;
-  background-color: #18181B;
-  color: #F4F4F5;
-  border-radius: 0.5rem;
+  background-color: #0B1120;
+  color: #F8FAFC;
+  border-radius: 0.625rem;
   overflow-x: auto;
   font-size: 0.84375rem;
   line-height: 1.55;
-}
-
-html.dark .expert-prose pre {
-  background-color: #020617;
   border: 1px solid #1E293B;
 }
 
@@ -241,18 +271,21 @@ html.dark .expert-prose pre {
 .expert-prose .katex-display {
   margin: 1rem 0;
   padding: 0.75rem 1rem;
-  background-color: #F8F7F3;
-  border: 1px solid #E5E2DC;
-  border-radius: 0.5rem;
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 0.625rem;
   overflow-x: auto;
 }
 
 html.dark .expert-prose .katex-display {
-  background-color: #0F172A;
+  background-color: #0B1120;
   border-color: #1E293B;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ambient-drift {
+    animation: none !important;
+  }
   *, ::before, ::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

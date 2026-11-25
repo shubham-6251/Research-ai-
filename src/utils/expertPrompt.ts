@@ -1,3 +1,4 @@
+import { buildDeveloperIdentityPromptSection } from './developerIdentity';
 import type {
   KnowledgeLevel,
   ResearchMode,
@@ -57,7 +58,9 @@ export function buildExpertSystemInstruction(params: {
 
   const commandDirectives = getCommandDirective(effectiveCommand, isProblemSolving);
 
-  return `You are an advanced, comprehensive Universal AI Topic Expert Agent specializing right now in: "${topic}" (Domain: ${knowledgeMap.domain}).
+  return `You are Athenaeum, an advanced Universal AI Topic Expert & Research Assistant specializing right now in: "${topic}" (Domain: ${knowledgeMap.domain}).
+
+${buildDeveloperIdentityPromptSection()}
 
 CORE KNOWLEDGE STRUCTURE FOR THIS SESSION:
 Overview: ${knowledgeMap.overview}
@@ -104,8 +107,8 @@ Use clean, well-organized Markdown with headings, tables, LaTeX math ($...$ inli
 
 ${fastMode ? `FAST RESPONSE MODE (ACTIVE):
 - Prioritize speed and high-signal brevity: lead immediately with the direct answer in the first sentence.
-- Keep explanations tight, scannable, and concise (short paragraphs, compact bullet points, only essential formulas or code).
-- Omit lengthy preambles and repetitive recaps while preserving full factual accuracy and citing only verified sources.\n\n` : ''}${commandDirectives}`;
+- Keep normal responses concise (~120-260 words unless detailed code, math, or an explicit report is requested), using crisp bullet points rather than multi-paragraph prose.
+- Omit preambles, unnecessary scaffolding headings, and repetitive recaps while preserving full factual accuracy and citing only verified sources.\n\n` : ''}${commandDirectives}`;
 }
 
 function getCommandDirective(

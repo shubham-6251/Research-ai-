@@ -1,37 +1,54 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { SlidersHorizontal, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MotionConfig } from 'motion/react';
 import { Header, type WorkspaceTab } from './components/Header';
+import { Sidebar } from './components/Sidebar';
 import { TopicInitScreen } from './components/TopicInitScreen';
-import { KnowledgeSidebar } from './components/KnowledgeSidebar';
 import { MessageList } from './components/MessageList';
 import { Composer } from './components/Composer';
 import { KnowledgeMapView } from './components/KnowledgeMapView';
 import { QuestionGeneratorView } from './components/QuestionGeneratorView';
 import { ReportView } from './components/ReportView';
-import { HistoryDrawer } from './components/HistoryDrawer';
 import { CommandsPanel, SourcesPanel } from './components/SourcesAndCommands';
+import { EmptyWorkspaceTool } from './components/EmptyWorkspaceTool';
+import { SettingsModal } from './components/SettingsModal';
 import { AudioPlayerBar, type TtsPlayerState } from './components/AudioPlayerBar';
 import { mergeUniqueSources } from './utils/citations';
 import { parseCommandInput } from './utils/commands';
 import { createDemoSession } from './utils/demoSeed';
-import { detectMentionedItems } from './utils/knowledgeTree';
+import { detectMentionedItems, normalizeKnowledgeStructure } from './utils/knowledgeTree';
 import { generateResearchPdf } from './utils/reportExport';
+import {
+  getResearchModeById,
+  inferResearchModeId,
+  prepareMessageForMode,
+} from './utils/researchModes';
 import { extractUserFriendlyError } from './utils/retry';
 import type { TtsVoiceName } from './utils/ttsText';
 import type {
   ChatMessage,
   GroundingSource,
   KnowledgeLevel,
+  MessageFeedback,
   QuestionBank,
-  ResearchMode,
+  ResearchModeId,
   ResponseSpeed,
   SpecialCommandName,
   TopicKnowledgeStructure,
   TopicSession,
+  UserSettings,
 } from './types';
 
 const STORAGE_KEY = 'athenaeum_topic_sessions_v1';
-const THEME_STORAGE_KEY = 'athenaeum_theme_v1';
+const SETTINGS_STORAGE_KEY = 'athenaeum_settings_v1';
+const LEGACY_THEME_KEY = 'athenaeum_theme_v1';
+
+const DEFAULT_SETTINGS: UserSettings = {
+  theme: 'dark',
+  defaultLevel: 'adaptive',
+  defaultResponseSpeed: 'fast',
+  defaultSearchGrounding: true,
+  ttsVoice: 'Kore',
+};
 
 function isValidSession(item: unknown): item is TopicSession {
   if (!item || typeof item !== 'object') return false;
@@ -69,14 +86,34 @@ function saveSessions(sessions: TopicSession[]) {
   }
 }
 
-function loadSavedTheme(): 'light' | 'dark' {
+function loadSavedSettings(): UserSettings {
   try {
-    const raw = localStorage.getItem(THEME_STORAGE_KEY);
-    if (raw === 'dark' || raw === 'light') return raw;
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<UserSettings>;
+      return {
+        theme:
+          parsed.theme === 'dark' || parsed.theme === 'light' || parsed.theme === 'system'
+            ? parsed.theme
+            : DEFAULT_SETTINGS.theme,
+        defaultLevel: parsed.defaultLevel ?? DEFAULT_SETTINGS.defaultLevel,
+        defaultResponseSpeed:
+          parsed.defaultResponseSpeed === 'fast' ? 'fast' : DEFAULT_SETTINGS.defaultResponseSpeed,
+        defaultSearchGrounding:
+          typeof parsed.defaultSearchGrounding === 'boolean'
+            ? parsed.defaultSearchGrounding
+            : DEFAULT_SETTINGS.defaultSearchGrounding,
+        ttsVoice: parsed.ttsVoice ?? DEFAULT_SETTINGS.ttsVoice,
+      };
+    }
+    const legacyTheme = localStorage.getItem(LEGACY_THEME_KEY);
+    if (legacyTheme === 'light' || legacyTheme === 'dark') {
+      return { ...DEFAULT_SETTINGS, theme: legacyTheme };
+    }
   } catch {
     // Ignore storage errors
   }
-  return 'light';
+  return DEFAULT_SETTINGS;
 }
 
 interface SseStreamEvent {
@@ -96,7 +133,7 @@ interface SseStreamEvent {
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => loadSavedTheme());
+  const [settings, setSettings] = useState<UserSettings>(() => loadSavedSettings());
   const [sessions, setSessions] = useState<TopicSession[]>(() => loadSavedSessions());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
@@ -108,45 +145,66 @@ export default function App() {
     return null;
   });
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('conversation');
+  const [draftModeId, setDraftModeId] = useState<ResearchModeId>('quick');
+  const [draftSearchGrounding, setDraftSearchGrounding] = useState<boolean>(
+    () => loadSavedSettings().defaultSearchGrounding
+  );
+  const [draftResponseSpeed, setDraftResponseSpeed] = useState<ResponseSpeed>(
+    () => loadSavedSettings().defaultResponseSpeed
+  );
+
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   const [isInitializing, setIsInitializing] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
   const [questionsError, setQuestionsError] = useState<string | null>(null);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-  const [ttsState, setTtsState] = useState<TtsPlayerState>({
+
+  const [ttsState, setTtsState] = useState<TtsPlayerState>(() => ({
     status: 'idle',
     messageId: null,
     title: '',
     sourceText: '',
-    voiceName: 'Kore',
+    voiceName: loadSavedSettings().ttsVoice,
     playbackRate: 1,
     currentTime: 0,
     duration: 0,
     error: null,
-  });
+  }));
 
   const abortRef = useRef<AbortController | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioCacheRef = useRef<Map<string, string>>(new Map());
 
-  // Sync Tailwind dark mode class
+  // Sync Tailwind dark mode class across dark / light / system
   useEffect(() => {
-    if (typeof document !== 'undefined') {
-      document.documentElement.classList.toggle('dark', theme === 'dark');
-    }
+    const applyTheme = () => {
+      if (typeof document === 'undefined') return;
+      const prefersDark =
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const shouldBeDark =
+        settings.theme === 'dark' || (settings.theme === 'system' && prefersDark);
+      document.documentElement.classList.toggle('dark', shouldBeDark);
+    };
+
+    applyTheme();
     try {
-      localStorage.setItem(THEME_STORAGE_KEY, theme);
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     } catch {
       // Ignore storage errors
     }
-  }, [theme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
-  }, []);
+    if (settings.theme === 'system' && typeof window !== 'undefined') {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      mq.addEventListener('change', applyTheme);
+      return () => mq.removeEventListener('change', applyTheme);
+    }
+  }, [settings]);
 
   // Seed demo session cleanly if ?autostart=1 is present
   useEffect(() => {
@@ -161,10 +219,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    saveSessions(sessions);
-  }, [sessions]);
+    if (!isStreaming) {
+      saveSessions(sessions);
+    }
+  }, [sessions, isStreaming]);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+
+  const activeModeId: ResearchModeId = activeSession
+    ? inferResearchModeId(
+        activeSession.researchModeId,
+        activeSession.activeMode,
+        activeSession.responseSpeed
+      )
+    : draftModeId;
+
+  const effectiveSearchGrounding = activeSession
+    ? activeSession.searchGrounding
+    : draftSearchGrounding;
 
   const updateActiveSession = useCallback(
     (updater: (session: TopicSession) => TopicSession) => {
@@ -175,36 +247,420 @@ export default function App() {
     [activeSessionId]
   );
 
-  const handleInitializeTopic = useCallback(
+  const handleUpdateSettings = useCallback((patch: Partial<UserSettings>) => {
+    setSettings((prev) => ({ ...prev, ...patch }));
+    if (typeof patch.defaultSearchGrounding === 'boolean') {
+      setDraftSearchGrounding(patch.defaultSearchGrounding);
+    }
+    if (patch.defaultResponseSpeed) {
+      setDraftResponseSpeed(patch.defaultResponseSpeed);
+    }
+    if (patch.ttsVoice) {
+      setTtsState((prev) => ({ ...prev, voiceName: patch.ttsVoice! }));
+    }
+  }, []);
+
+  const handleStopStreaming = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsStreaming(false);
+    updateActiveSession((s) => ({
+      ...s,
+      messages: s.messages.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)),
+    }));
+  }, [updateActiveSession]);
+
+  const streamIntoSession = useCallback(
     async (
-      topic: string,
-      level: KnowledgeLevel,
-      searchGrounding: boolean,
-      mode: ResearchMode = 'research'
+      targetSession: TopicSession,
+      rawText: string,
+      options?: {
+        truncateBeforeMessageId?: string;
+        overrideModeId?: ResearchModeId;
+      }
     ) => {
-      setIsInitializing(true);
+      if (isStreaming) return;
+
+      const modeId =
+        options?.overrideModeId ??
+        inferResearchModeId(
+          targetSession.researchModeId,
+          targetSession.activeMode,
+          targetSession.responseSpeed
+        );
+      const modeOption = getResearchModeById(modeId);
+      const prepared = prepareMessageForMode(rawText, modeId);
+      const parsed = parseCommandInput(prepared.dispatchText);
+
+      const userMsgId = `u-${Date.now()}`;
+      const assistantMsgId = `a-${Date.now() + 1}`;
+      const now = new Date().toISOString();
+
+      // Keep clean user-facing text in chat bubble while dispatching mode-enhanced instruction
+      const userMessage: ChatMessage = {
+        id: userMsgId,
+        role: 'user',
+        content: rawText.trim(),
+        command: parsed.command,
+        modeLabel: prepared.modeLabel,
+        timestamp: now,
+      };
+
+      const requestSpeed: ResponseSpeed =
+        modeOption.forcedSpeed ?? targetSession.responseSpeed ?? 'standard';
+      const requestMode = prepared.apiMode;
+
+      const placeholderAssistant: ChatMessage = {
+        id: assistantMsgId,
+        role: 'assistant',
+        content: '',
+        command: parsed.command,
+        modeLabel: parsed.command ? parsed.modeLabel : prepared.modeLabel,
+        searchGrounded: targetSession.searchGrounding,
+        responseSpeed: requestSpeed,
+        timestamp: now,
+        isStreaming: true,
+      };
+
+      let baseMessages = targetSession.messages;
+      if (options?.truncateBeforeMessageId) {
+        const idx = baseMessages.findIndex((m) => m.id === options.truncateBeforeMessageId);
+        if (idx !== -1) {
+          baseMessages = baseMessages.slice(0, idx);
+        }
+      }
+
+      const priorHistory = baseMessages
+        .filter((m) => !m.error && m.content.trim().length > 0)
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === targetSession.id
+            ? {
+                ...s,
+                updatedAt: now,
+                messages: [...baseMessages, userMessage, placeholderAssistant],
+              }
+            : s
+        )
+      );
+
+      setIsStreaming(true);
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      let accumulatedText = '';
+      let finalSources: GroundingSource[] = [];
+      let finalSearchGrounded = targetSession.searchGrounding;
+      let finalResponseSpeed: ResponseSpeed = requestSpeed;
+      let finalGroundingNote: string | undefined;
+      let finalGroundingNotice: string | undefined;
+      let pendingRafId: number | null = null;
+
+      const flushStreamText = () => {
+        pendingRafId = null;
+        const currentText = accumulatedText;
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === targetSession.id
+              ? {
+                  ...s,
+                  messages: s.messages.map((m) =>
+                    m.id === assistantMsgId ? { ...m, content: currentText } : m
+                  ),
+                }
+              : s
+          )
+        );
+      };
+
+      const scheduleChunkFlush = () => {
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          if (pendingRafId === null) {
+            pendingRafId = window.requestAnimationFrame(flushStreamText);
+          }
+        } else {
+          flushStreamText();
+        }
+      };
+
+      const processSseLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) return;
+        const jsonStr = trimmed.slice(5).trim();
+        if (!jsonStr) return;
+
+        let event: SseStreamEvent;
+        try {
+          event = JSON.parse(jsonStr) as SseStreamEvent;
+        } catch {
+          return;
+        }
+
+        if (event.type === 'fallback') {
+          finalSearchGrounded = false;
+          finalGroundingNote = event.noteLabel;
+          finalGroundingNotice = event.completedMessage;
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSession.id
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) =>
+                      m.id === assistantMsgId
+                        ? {
+                            ...m,
+                            searchGrounded: false,
+                            groundingNote: event.noteLabel,
+                            groundingNotice: event.streamingMessage,
+                          }
+                        : m
+                    ),
+                  }
+                : s
+            )
+          );
+        } else if (event.type === 'chunk' && event.text) {
+          accumulatedText += event.text;
+          scheduleChunkFlush();
+        } else if (event.type === 'done') {
+          if (pendingRafId !== null && typeof window !== 'undefined') {
+            window.cancelAnimationFrame(pendingRafId);
+            pendingRafId = null;
+          }
+          finalSources = Array.isArray(event.sources) ? event.sources : [];
+          if (typeof event.searchGrounded === 'boolean') {
+            finalSearchGrounded = event.searchGrounded;
+          }
+          if (event.responseSpeed === 'fast' || event.responseSpeed === 'standard') {
+            finalResponseSpeed = event.responseSpeed;
+          }
+          if (event.searchFallback) {
+            finalGroundingNote = event.searchFallback.noteLabel;
+            finalGroundingNotice = event.searchFallback.completedMessage;
+          }
+        } else if (event.type === 'error') {
+          throw new Error(event.error || 'Error while generating response.');
+        }
+      };
+
+      try {
+        const res = await fetch('/api/topic/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            topic: targetSession.topic,
+            level: targetSession.level,
+            searchGrounding: targetSession.searchGrounding,
+            responseSpeed: requestSpeed,
+            activeMode: requestMode,
+            knowledgeMap: targetSession.knowledgeMap,
+            exploredItems: targetSession.exploredItems,
+            history: priorHistory,
+            message: prepared.dispatchText,
+          }),
+        });
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson?.error || `Request failed with status ${res.status}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) {
+          throw new Error('Streaming response body unavailable.');
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            buffer += decoder.decode();
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            processSseLine(line);
+          }
+        }
+
+        if (buffer.trim()) {
+          for (const trailingLine of buffer.split('\n')) {
+            processSseLine(trailingLine);
+          }
+        }
+
+        const newlyMentioned = detectMentionedItems(
+          `${rawText}\n${accumulatedText}`,
+          targetSession.knowledgeMap
+        );
+
+        setSessions((prev) =>
+          prev.map((s) => {
+            if (s.id !== targetSession.id) return s;
+            const mergedExplored = Array.from(
+              new Set([...s.exploredItems, ...newlyMentioned])
+            );
+            return {
+              ...s,
+              updatedAt: new Date().toISOString(),
+              exploredItems: mergedExplored,
+              allSources: mergeUniqueSources(s.allSources, finalSources),
+              messages: s.messages.map((m) =>
+                m.id === assistantMsgId
+                  ? {
+                      ...m,
+                      content: accumulatedText,
+                      sources: finalSources,
+                      searchGrounded: finalSearchGrounded,
+                      responseSpeed: finalResponseSpeed,
+                      groundingNote: finalGroundingNote,
+                      groundingNotice: finalGroundingNotice,
+                      isStreaming: false,
+                    }
+                  : m
+              ),
+            };
+          })
+        );
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') {
+          return;
+        }
+        const errMsg = extractUserFriendlyError(err).message;
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === targetSession.id
+              ? {
+                  ...s,
+                  messages: s.messages.map((m) =>
+                    m.id === assistantMsgId
+                      ? { ...m, isStreaming: false, error: errMsg }
+                      : m
+                  ),
+                }
+              : s
+          )
+        );
+      } finally {
+        if (pendingRafId !== null && typeof window !== 'undefined') {
+          window.cancelAnimationFrame(pendingRafId);
+          pendingRafId = null;
+        }
+        abortRef.current = null;
+        setIsStreaming(false);
+      }
+    },
+    [isStreaming]
+  );
+
+  const handleStartResearch = useCallback(
+    async (params: {
+      topic: string;
+      initialQuestion?: string;
+      modeId: ResearchModeId;
+      level: KnowledgeLevel;
+      searchGrounding: boolean;
+      responseSpeed: ResponseSpeed;
+    }) => {
+      if (isInitializing || isStreaming) return;
       setInitError(null);
+
+      const modeObj = getResearchModeById(params.modeId);
+      const hasQuestion = Boolean(params.initialQuestion && params.initialQuestion.trim().length > 0);
+
+      // Fast path: when user asks a question immediately, open session in 0ms and initialize Knowledge Map in parallel
+      if (hasQuestion) {
+        const now = new Date().toISOString();
+        const sessionId = `topic-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const seedMap = normalizeKnowledgeStructure({}, params.topic);
+        const newSession: TopicSession = {
+          id: sessionId,
+          topic: seedMap.topic,
+          level: params.level,
+          searchGrounding: params.searchGrounding,
+          responseSpeed: params.responseSpeed,
+          activeMode: modeObj.apiMode,
+          researchModeId: params.modeId,
+          knowledgeMap: seedMap,
+          exploredItems: [],
+          messages: [],
+          allSources: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        setSessions((prev) => [newSession, ...prev.slice(0, 24)]);
+        setActiveSessionId(sessionId);
+        setActiveTab('conversation');
+        setQuestionsError(null);
+
+        await streamIntoSession(newSession, params.initialQuestion!, {
+          overrideModeId: params.modeId,
+        });
+
+        // Enrich knowledge map quietly in background AFTER chat stream finishes so it never competes for latency/quota
+        if (!/\bshubham\s+verma\b/i.test(params.topic)) {
+          void fetch('/api/topic/initialize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topic: params.topic, level: params.level }),
+          })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
+              if (data?.knowledgeMap) {
+                const richMap = data.knowledgeMap as TopicKnowledgeStructure;
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId
+                      ? {
+                          ...s,
+                          topic: richMap.topic || s.topic,
+                          knowledgeMap: richMap,
+                        }
+                      : s
+                  )
+                );
+              }
+            })
+            .catch(() => {
+              // Keep seed knowledge map silently if background enrichment fails
+            });
+        }
+        return;
+      }
+
+      setIsInitializing(true);
       try {
         const res = await fetch('/api/topic/initialize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ topic, level }),
+          body: JSON.stringify({ topic: params.topic, level: params.level }),
         });
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error(data?.error || 'Failed to initialize topic expert.');
+          throw new Error(data?.error || 'Failed to initialize research topic.');
         }
 
         const knowledgeMap = data.knowledgeMap as TopicKnowledgeStructure;
         const now = new Date().toISOString();
         const newSession: TopicSession = {
           id: `topic-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          topic: knowledgeMap.topic || topic,
-          level,
-          searchGrounding,
-          responseSpeed: 'standard',
-          activeMode: mode,
+          topic: knowledgeMap.topic || params.topic,
+          level: params.level,
+          searchGrounding: params.searchGrounding,
+          responseSpeed: params.responseSpeed,
+          activeMode: modeObj.apiMode,
+          researchModeId: params.modeId,
           knowledgeMap,
           exploredItems: [],
           messages: [],
@@ -217,25 +673,16 @@ export default function App() {
         setActiveSessionId(newSession.id);
         setActiveTab('conversation');
         setQuestionsError(null);
+        setIsInitializing(false);
       } catch (err) {
         setInitError(extractUserFriendlyError(err).message);
-      } finally {
         setIsInitializing(false);
       }
     },
-    []
+    [isInitializing, isStreaming, streamIntoSession]
   );
 
-  const handleStopStreaming = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setIsStreaming(false);
-    updateActiveSession((s) => ({
-      ...s,
-      messages: s.messages.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)),
-    }));
-  }, [updateActiveSession]);
-
+  // Audio player lifecycle
   useEffect(() => {
     const audio = new Audio();
     audioRef.current = audio;
@@ -464,7 +911,7 @@ export default function App() {
     [startTtsPlayback, ttsState.messageId, ttsState.playbackRate, ttsState.sourceText, ttsState.title]
   );
 
-  const handleNewTopic = useCallback(() => {
+  const handleNewResearch = useCallback(() => {
     if (isStreaming) {
       handleStopStreaming();
     }
@@ -472,20 +919,20 @@ export default function App() {
     setActiveSessionId(null);
     setInitError(null);
     setQuestionsError(null);
-    setIsMobileSidebarOpen(false);
+    setIsMobileDrawerOpen(false);
     setActiveTab('conversation');
   }, [isStreaming, handleStopStreaming, closeTtsPlayer]);
 
   const handleSelectSession = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, targetTab: WorkspaceTab = 'conversation') => {
       if (isStreaming) {
         handleStopStreaming();
       }
       closeTtsPlayer();
       setActiveSessionId(sessionId);
       setQuestionsError(null);
-      setIsMobileSidebarOpen(false);
-      setActiveTab('conversation');
+      setIsMobileDrawerOpen(false);
+      setActiveTab(targetTab);
     },
     [isStreaming, handleStopStreaming, closeTtsPlayer]
   );
@@ -501,282 +948,96 @@ export default function App() {
     [activeSessionId]
   );
 
+  const handleClearAllHistory = useCallback(() => {
+    if (isStreaming) {
+      handleStopStreaming();
+    }
+    closeTtsPlayer();
+    setSessions([]);
+    setActiveSessionId(null);
+    setActiveTab('conversation');
+  }, [isStreaming, handleStopStreaming, closeTtsPlayer]);
+
+  const handleSelectMode = useCallback(
+    (modeId: ResearchModeId) => {
+      const modeOpt = getResearchModeById(modeId);
+      if (activeSession) {
+        updateActiveSession((s) => ({
+          ...s,
+          researchModeId: modeId,
+          activeMode: modeOpt.apiMode,
+          responseSpeed: modeOpt.forcedSpeed ?? s.responseSpeed ?? 'fast',
+        }));
+      } else {
+        setDraftModeId(modeId);
+        if (modeOpt.forcedSpeed) setDraftResponseSpeed(modeOpt.forcedSpeed);
+      }
+    },
+    [activeSession, updateActiveSession]
+  );
+
   const handleSendMessage = useCallback(
-    async (rawText: string, replaceIds?: { userMsgId: string; assistantMsgId: string }) => {
+    async (rawText: string) => {
       if (!activeSession || isStreaming) return;
 
       const parsed = parseCommandInput(rawText);
-
-      // Handle /change-topic directly
       if (parsed.isChangeTopic) {
         if (parsed.argument.length > 0) {
-          await handleInitializeTopic(
-            parsed.argument,
-            activeSession.level,
-            activeSession.searchGrounding,
-            activeSession.activeMode ?? 'research'
-          );
+          await handleStartResearch({
+            topic: parsed.argument,
+            modeId: activeModeId,
+            level: activeSession.level,
+            searchGrounding: activeSession.searchGrounding,
+            responseSpeed: activeSession.responseSpeed ?? 'standard',
+          });
         } else {
-          handleNewTopic();
+          handleNewResearch();
         }
         return;
       }
 
       setActiveTab('conversation');
-      setIsMobileSidebarOpen(false);
-
-      const userMsgId = `u-${Date.now()}`;
-      const assistantMsgId = `a-${Date.now() + 1}`;
-      const now = new Date().toISOString();
-
-      const userMessage: ChatMessage = {
-        id: userMsgId,
-        role: 'user',
-        content: rawText,
-        command: parsed.command,
-        modeLabel: parsed.modeLabel,
-        timestamp: now,
-      };
-
-      const requestSpeed: ResponseSpeed = activeSession.responseSpeed ?? 'standard';
-      const requestMode: ResearchMode = activeSession.activeMode ?? 'qa';
-
-      const placeholderAssistant: ChatMessage = {
-        id: assistantMsgId,
-        role: 'assistant',
-        content: '',
-        command: parsed.command,
-        modeLabel: parsed.modeLabel,
-        searchGrounded: activeSession.searchGrounding,
-        responseSpeed: requestSpeed,
-        timestamp: now,
-        isStreaming: true,
-      };
-
-      const filteredMessages = replaceIds
-        ? activeSession.messages.filter(
-            (m) => m.id !== replaceIds.userMsgId && m.id !== replaceIds.assistantMsgId
-          )
-        : activeSession.messages;
-
-      const priorHistory = filteredMessages
-        .filter((m) => !m.error && m.content.trim().length > 0)
-        .map((m) => ({ role: m.role, content: m.content }));
-
-      const sessionSnapshot = activeSession;
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === sessionSnapshot.id
-            ? {
-                ...s,
-                updatedAt: now,
-                messages: [
-                  ...(replaceIds
-                    ? s.messages.filter(
-                        (m) =>
-                          m.id !== replaceIds.userMsgId &&
-                          m.id !== replaceIds.assistantMsgId
-                      )
-                    : s.messages),
-                  userMessage,
-                  placeholderAssistant,
-                ],
-              }
-            : s
-        )
-      );
-
-      setIsStreaming(true);
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      let accumulatedText = '';
-      let finalSources: GroundingSource[] = [];
-      let finalSearchGrounded = sessionSnapshot.searchGrounding;
-      let finalResponseSpeed: ResponseSpeed = requestSpeed;
-      let finalGroundingNote: string | undefined;
-      let finalGroundingNotice: string | undefined;
-
-      const processSseLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) return;
-        const jsonStr = trimmed.slice(5).trim();
-        if (!jsonStr) return;
-
-        let event: SseStreamEvent;
-        try {
-          event = JSON.parse(jsonStr) as SseStreamEvent;
-        } catch {
-          return;
-        }
-
-        if (event.type === 'fallback') {
-          finalSearchGrounded = false;
-          finalGroundingNote = event.noteLabel;
-          finalGroundingNotice = event.completedMessage;
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === sessionSnapshot.id
-                ? {
-                    ...s,
-                    messages: s.messages.map((m) =>
-                      m.id === assistantMsgId
-                        ? {
-                            ...m,
-                            searchGrounded: false,
-                            groundingNote: event.noteLabel,
-                            groundingNotice: event.streamingMessage,
-                          }
-                        : m
-                    ),
-                  }
-                : s
-            )
-          );
-        } else if (event.type === 'chunk' && event.text) {
-          accumulatedText += event.text;
-          const currentText = accumulatedText;
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === sessionSnapshot.id
-                ? {
-                    ...s,
-                    messages: s.messages.map((m) =>
-                      m.id === assistantMsgId ? { ...m, content: currentText } : m
-                    ),
-                  }
-                : s
-            )
-          );
-        } else if (event.type === 'done') {
-          finalSources = Array.isArray(event.sources) ? event.sources : [];
-          if (typeof event.searchGrounded === 'boolean') {
-            finalSearchGrounded = event.searchGrounded;
-          }
-          if (event.responseSpeed === 'fast' || event.responseSpeed === 'standard') {
-            finalResponseSpeed = event.responseSpeed;
-          }
-          if (event.searchFallback) {
-            finalGroundingNote = event.searchFallback.noteLabel;
-            finalGroundingNotice = event.searchFallback.completedMessage;
-          }
-        } else if (event.type === 'error') {
-          throw new Error(event.error || 'Error while generating response.');
-        }
-      };
-
-      try {
-        const res = await fetch('/api/topic/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            topic: sessionSnapshot.topic,
-            level: sessionSnapshot.level,
-            searchGrounding: sessionSnapshot.searchGrounding,
-            responseSpeed: requestSpeed,
-            activeMode: requestMode,
-            knowledgeMap: sessionSnapshot.knowledgeMap,
-            exploredItems: sessionSnapshot.exploredItems,
-            history: priorHistory,
-            message: rawText,
-          }),
-        });
-
-        if (!res.ok) {
-          const errJson = await res.json().catch(() => ({}));
-          throw new Error(errJson?.error || `Request failed with status ${res.status}`);
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) {
-          throw new Error('Streaming response body unavailable.');
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            buffer += decoder.decode();
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() ?? '';
-
-          for (const line of lines) {
-            processSseLine(line);
-          }
-        }
-
-        if (buffer.trim()) {
-          for (const trailingLine of buffer.split('\n')) {
-            processSseLine(trailingLine);
-          }
-        }
-
-        const newlyMentioned = detectMentionedItems(
-          `${rawText}\n${accumulatedText}`,
-          sessionSnapshot.knowledgeMap
-        );
-
-        setSessions((prev) =>
-          prev.map((s) => {
-            if (s.id !== sessionSnapshot.id) return s;
-            const mergedExplored = Array.from(
-              new Set([...s.exploredItems, ...newlyMentioned])
-            );
-            return {
-              ...s,
-              updatedAt: new Date().toISOString(),
-              exploredItems: mergedExplored,
-              allSources: mergeUniqueSources(s.allSources, finalSources),
-              messages: s.messages.map((m) =>
-                m.id === assistantMsgId
-                  ? {
-                      ...m,
-                      content: accumulatedText,
-                      sources: finalSources,
-                      searchGrounded: finalSearchGrounded,
-                      responseSpeed: finalResponseSpeed,
-                      groundingNote: finalGroundingNote,
-                      groundingNotice: finalGroundingNotice,
-                      isStreaming: false,
-                    }
-                  : m
-              ),
-            };
-          })
-        );
-      } catch (err) {
-        if ((err as Error)?.name === 'AbortError') {
-          return;
-        }
-        const errMsg = extractUserFriendlyError(err).message;
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === sessionSnapshot.id
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMsgId
-                      ? { ...m, isStreaming: false, error: errMsg }
-                      : m
-                  ),
-                }
-              : s
-          )
-        );
-      } finally {
-        abortRef.current = null;
-        setIsStreaming(false);
-      }
+      setIsMobileDrawerOpen(false);
+      await streamIntoSession(activeSession, rawText);
     },
-    [activeSession, isStreaming, handleInitializeTopic, handleNewTopic]
+    [activeSession, isStreaming, activeModeId, handleStartResearch, handleNewResearch, streamIntoSession]
+  );
+
+  const handleEditAndResend = useCallback(
+    async (userMessageId: string, editedText: string) => {
+      if (!activeSession || isStreaming) return;
+      await streamIntoSession(activeSession, editedText, {
+        truncateBeforeMessageId: userMessageId,
+      });
+    },
+    [activeSession, isStreaming, streamIntoSession]
+  );
+
+  const handleRetryMessage = useCallback(
+    async (assistantMsgId: string) => {
+      if (!activeSession || isStreaming) return;
+      const idx = activeSession.messages.findIndex((m) => m.id === assistantMsgId);
+      if (idx <= 0) return;
+      const precedingUser = activeSession.messages[idx - 1];
+      if (!precedingUser || precedingUser.role !== 'user') return;
+
+      await streamIntoSession(activeSession, precedingUser.content, {
+        truncateBeforeMessageId: precedingUser.id,
+      });
+    },
+    [activeSession, isStreaming, streamIntoSession]
+  );
+
+  const handleFeedback = useCallback(
+    (messageId: string, feedback: MessageFeedback) => {
+      updateActiveSession((s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === messageId ? { ...m, feedback } : m
+        ),
+      }));
+    },
+    [updateActiveSession]
   );
 
   const handleGenerateQuestions = useCallback(
@@ -829,206 +1090,62 @@ export default function App() {
     generateResearchPdf(activeSession);
   }, [activeSession]);
 
-  const handleJumpToSection = (sectionId: string) => {
-    const el = document.getElementById(sectionId);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      if (sectionId === 'topic-input') {
-        el.focus();
-      }
-    }
-  };
-
-  const handleRetryMessage = useCallback(
-    async (failedAssistantId: string) => {
-      if (!activeSession || isStreaming) return;
-      const idx = activeSession.messages.findIndex((m) => m.id === failedAssistantId);
-      if (idx <= 0) return;
-      const precedingUser = activeSession.messages[idx - 1];
-      if (!precedingUser || precedingUser.role !== 'user') return;
-
-      await handleSendMessage(precedingUser.content, {
-        userMsgId: precedingUser.id,
-        assistantMsgId: failedAssistantId,
-      });
-    },
-    [activeSession, isStreaming, handleSendMessage]
-  );
-
   const handleTriggerCommandFromPanel = (cmd: SpecialCommandName) => {
     if (!activeSession) return;
     if (cmd === '/change-topic') {
-      handleNewTopic();
+      handleNewResearch();
       return;
     }
     handleSendMessage(`${cmd} ${activeSession.topic}`);
   };
 
+  // Aggregated sources across all sessions when viewing Saved Sources outside a single session
+  const aggregatedSources = useMemo(() => {
+    if (activeSession) return activeSession.allSources;
+    return sessions.reduce<GroundingSource[]>(
+      (acc, s) => mergeUniqueSources(acc, s.allSources),
+      []
+    );
+  }, [activeSession, sessions]);
+
   return (
-    <div
-      className={
-        activeSession
-          ? 'h-screen overflow-hidden flex flex-col bg-[#FAF9F6] dark:bg-[#0B1120] text-[#18181B] dark:text-[#F8FAFC]'
-          : 'min-h-screen flex flex-col bg-[#FAF9F6] dark:bg-[#0B1120] text-[#18181B] dark:text-[#F8FAFC]'
-      }
-    >
-      <Header
-        inWorkspace={Boolean(activeSession)}
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        onNewTopic={handleNewTopic}
-        onJumpToSection={handleJumpToSection}
-      />
-
-      {!activeSession ? (
-        <TopicInitScreen
-          isInitializing={isInitializing}
-          error={initError}
-          recentSessions={sessions}
-          theme={theme}
-          onToggleTheme={toggleTheme}
-          onInitializeTopic={handleInitializeTopic}
-          onResumeSession={handleSelectSession}
+    <MotionConfig reducedMotion="user">
+      <div className="h-dvh w-full overflow-hidden flex bg-[#F8FAFC] dark:bg-[#060913] text-slate-900 dark:text-slate-50">
+        <Sidebar
+          sessions={sessions}
+          activeSession={activeSession}
+          activeTab={activeTab}
+          isCollapsed={isSidebarCollapsed}
+          isMobileOpen={isMobileDrawerOpen}
+          isBusy={isStreaming || isInitializing}
+          onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
+          onCloseMobile={() => setIsMobileDrawerOpen(false)}
+          onNewResearch={handleNewResearch}
+          onSelectSession={(id) => handleSelectSession(id, 'conversation')}
           onDeleteSession={handleDeleteSession}
+          onSelectTab={(tab) => setActiveTab(tab)}
+          onQuickPrompt={(prompt) => handleSendMessage(prompt)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
         />
-      ) : (
-        <div className="flex-1 min-h-0 flex flex-col md:flex-row max-w-[1440px] w-full mx-auto overflow-hidden">
-          {/* Desktop Sidebar */}
-          <aside className="hidden md:block w-[300px] lg:w-[320px] shrink-0 h-full min-h-0 overflow-hidden">
-            <KnowledgeSidebar
-              session={activeSession}
-              sessionCount={sessions.length}
-              theme={theme}
-              onToggleTheme={toggleTheme}
-              onOpenHistory={() => setIsHistoryOpen(true)}
-              onExportPdf={handleExportPdf}
-              onOpenCommands={() => setActiveTab('commands')}
-              onChangeMode={(activeMode) =>
-                updateActiveSession((s) => ({ ...s, activeMode }))
-              }
-              onChangeLevel={(level) =>
-                updateActiveSession((s) => ({ ...s, level }))
-              }
-              onChangeResponseSpeed={(responseSpeed) =>
-                updateActiveSession((s) => ({ ...s, responseSpeed }))
-              }
-              onToggleSearch={() =>
-                updateActiveSession((s) => ({
-                  ...s,
-                  searchGrounding: !s.searchGrounding,
-                }))
-              }
-              onQuickPrompt={(prompt) => handleSendMessage(prompt)}
-              isBusy={isStreaming}
-            />
-          </aside>
 
-          {/* Mobile View Switcher (compact single-line strip <= 42px) */}
-          <div className="md:hidden flex items-center gap-1 px-3 py-1.5 bg-[#F4F2EC] dark:bg-[#0F172A] border-b border-[#E5E2DC] dark:border-[#1E293B] overflow-x-auto shrink-0">
-            <button
-              type="button"
-              onClick={() => setIsMobileSidebarOpen(true)}
-              aria-label="Open workspace controls and settings"
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#1E40AF] dark:text-[#60A5FA] bg-white dark:bg-[#1E293B] border border-[#BFDBFE] dark:border-[#3B82F6]/40 rounded-md whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>Controls</span>
-            </button>
-            {(
-              [
-                { id: 'conversation', label: 'Chat' },
-                { id: 'knowledge', label: 'Map' },
-                { id: 'questions', label: 'Quiz' },
-                { id: 'sources', label: 'Sources' },
-                { id: 'report', label: 'Report' },
-              ] as const
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`px-2.5 py-1.5 text-xs font-medium rounded-md whitespace-nowrap shrink-0 cursor-pointer ${
-                  activeTab === tab.id
-                    ? 'bg-white dark:bg-[#1E293B] text-[#111827] dark:text-[#F8FAFC] shadow-xs'
-                    : 'text-[#52525B] dark:text-[#94A3B8]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          <Header
+            activeSession={activeSession}
+            activeTab={activeTab}
+            selectedModeId={activeModeId}
+            searchGrounding={effectiveSearchGrounding}
+            isSidebarCollapsed={isSidebarCollapsed}
+            isStreaming={isStreaming}
+            isInitializing={isInitializing}
+            onExpandSidebar={() => setIsSidebarCollapsed(false)}
+            onOpenMobileMenu={() => setIsMobileDrawerOpen(true)}
+            onSelectMode={handleSelectMode}
+            onSelectTab={setActiveTab}
+            onExportPdf={handleExportPdf}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+          />
 
-          {/* Mobile Slide-Over Controls Drawer */}
-          {isMobileSidebarOpen && (
-            <div
-              className="fixed inset-0 z-40 md:hidden flex bg-black/45 backdrop-blur-xs"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Workspace controls and knowledge structure"
-            >
-              <div className="w-[86vw] max-w-[340px] h-full bg-[#F4F2EC] dark:bg-[#0F172A] flex flex-col shadow-xl">
-                <div className="px-4 py-3 border-b border-[#E5E2DC] dark:border-[#1E293B] flex items-center justify-between">
-                  <span className="text-xs font-semibold text-[#52525B] dark:text-[#94A3B8]">
-                    Workspace Controls &amp; Knowledge Map
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsMobileSidebarOpen(false)}
-                    aria-label="Close workspace controls"
-                    className="p-2 min-h-[38px] min-w-[38px] flex items-center justify-center text-[#52525B] dark:text-[#94A3B8] rounded-lg cursor-pointer"
-                  >
-                    <X className="w-4 h-4" aria-hidden="true" />
-                  </button>
-                </div>
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  <KnowledgeSidebar
-                    session={activeSession}
-                    sessionCount={sessions.length}
-                    theme={theme}
-                    onToggleTheme={toggleTheme}
-                    onOpenHistory={() => {
-                      setIsMobileSidebarOpen(false);
-                      setIsHistoryOpen(true);
-                    }}
-                    onExportPdf={() => {
-                      setIsMobileSidebarOpen(false);
-                      handleExportPdf();
-                    }}
-                    onOpenCommands={() => {
-                      setIsMobileSidebarOpen(false);
-                      setActiveTab('commands');
-                    }}
-                    onChangeMode={(activeMode) =>
-                      updateActiveSession((s) => ({ ...s, activeMode }))
-                    }
-                    onChangeLevel={(level) =>
-                      updateActiveSession((s) => ({ ...s, level }))
-                    }
-                    onChangeResponseSpeed={(responseSpeed) =>
-                      updateActiveSession((s) => ({ ...s, responseSpeed }))
-                    }
-                    onToggleSearch={() =>
-                      updateActiveSession((s) => ({
-                        ...s,
-                        searchGrounding: !s.searchGrounding,
-                      }))
-                    }
-                    onQuickPrompt={(prompt) => handleSendMessage(prompt)}
-                    isBusy={isStreaming}
-                  />
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-label="Dismiss controls backdrop"
-                onClick={() => setIsMobileSidebarOpen(false)}
-                className="flex-1 cursor-pointer"
-              />
-            </div>
-          )}
-
-          {/* Main Workspace Area */}
-          <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          {activeSession && (
             <AudioPlayerBar
               state={ttsState}
               activeTab={activeTab}
@@ -1050,92 +1167,137 @@ export default function App() {
               onClose={closeTtsPlayer}
               onSwitchTab={setActiveTab}
             />
+          )}
 
-            {activeTab === 'conversation' && (
-              <>
-                <MessageList
-                  session={activeSession}
-                  isStreaming={isStreaming}
-                  ttsState={ttsState}
-                  onListen={(id, title, text) => startTtsPlayback(id, title, text)}
-                  onRetryMessage={handleRetryMessage}
-                  onQuickPrompt={(prompt) => handleSendMessage(prompt)}
-                  onOpenQuestions={() => setActiveTab('questions')}
-                  onExportPdf={handleExportPdf}
-                />
-                <Composer
-                  topic={activeSession.topic}
-                  isStreaming={isStreaming}
-                  responseSpeed={activeSession.responseSpeed ?? 'standard'}
-                  onToggleResponseSpeed={() =>
-                    updateActiveSession((s) => ({
-                      ...s,
-                      responseSpeed:
-                        (s.responseSpeed ?? 'standard') === 'fast' ? 'standard' : 'fast',
-                    }))
-                  }
-                  onSend={handleSendMessage}
-                  onStop={handleStopStreaming}
-                />
-              </>
-            )}
-
-            {activeTab === 'knowledge' && (
-              <KnowledgeMapView
-                session={activeSession}
-                isBusy={isStreaming}
-                onSelectSubtopic={(sub) => handleSendMessage(`/explain ${sub}`)}
-              />
-            )}
-
-            {activeTab === 'questions' && (
-              <QuestionGeneratorView
-                session={activeSession}
-                isGenerating={isGeneratingQuestions}
-                error={questionsError}
-                onGenerate={handleGenerateQuestions}
-                onAskFollowUp={(prompt) => handleSendMessage(prompt)}
-              />
-            )}
-
-            {activeTab === 'sources' && (
+          {!activeSession ? (
+            activeTab === 'sources' ? (
               <SourcesPanel
-                topic={activeSession.topic}
-                sources={activeSession.allSources}
-                isBusy={isStreaming}
-                onFetchSources={() =>
-                  handleSendMessage(`/sources ${activeSession.topic}`)
+                topic="All Saved Sessions"
+                sources={aggregatedSources}
+                isBusy={isInitializing}
+                onFetchSources={() => setActiveTab('conversation')}
+              />
+            ) : activeTab === 'knowledge' || activeTab === 'questions' || activeTab === 'report' ? (
+              <EmptyWorkspaceTool
+                tab={activeTab}
+                sessions={sessions}
+                onSelectSessionForTab={(id, tab) => handleSelectSession(id, tab)}
+                onNewResearch={() => setActiveTab('conversation')}
+              />
+            ) : (
+              <TopicInitScreen
+                isInitializing={isInitializing}
+                error={initError}
+                selectedModeId={activeModeId}
+                searchGrounding={draftSearchGrounding}
+                responseSpeed={draftResponseSpeed}
+                defaultLevel={settings.defaultLevel}
+                onSelectMode={handleSelectMode}
+                onToggleSearchGrounding={() => setDraftSearchGrounding((prev) => !prev)}
+                onToggleResponseSpeed={() =>
+                  setDraftResponseSpeed((prev) => (prev === 'fast' ? 'standard' : 'fast'))
                 }
+                onStartResearch={handleStartResearch}
               />
-            )}
+            )
+          ) : (
+            <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+              {activeTab === 'conversation' && (
+                <>
+                  <MessageList
+                    session={activeSession}
+                    isStreaming={isStreaming}
+                    ttsState={ttsState}
+                    onListen={(id, title, text) => startTtsPlayback(id, title, text)}
+                    onRetryMessage={handleRetryMessage}
+                    onEditAndResend={handleEditAndResend}
+                    onFeedback={handleFeedback}
+                    onQuickPrompt={(prompt) => handleSendMessage(prompt)}
+                    onOpenQuestions={() => setActiveTab('questions')}
+                    onExportPdf={handleExportPdf}
+                  />
+                  <Composer
+                    topic={activeSession.topic}
+                    isStreaming={isStreaming}
+                    responseSpeed={activeSession.responseSpeed ?? 'standard'}
+                    searchGrounding={activeSession.searchGrounding}
+                    selectedModeId={activeModeId}
+                    onSelectMode={handleSelectMode}
+                    onToggleSearchGrounding={() =>
+                      updateActiveSession((s) => ({
+                        ...s,
+                        searchGrounding: !s.searchGrounding,
+                      }))
+                    }
+                    onToggleResponseSpeed={() =>
+                      updateActiveSession((s) => ({
+                        ...s,
+                        responseSpeed:
+                          (s.responseSpeed ?? 'standard') === 'fast' ? 'standard' : 'fast',
+                      }))
+                    }
+                    onSend={handleSendMessage}
+                    onStop={handleStopStreaming}
+                  />
+                </>
+              )}
 
-            {activeTab === 'report' && (
-              <ReportView
-                session={activeSession}
-                isBusy={isStreaming}
-                onRunCommand={(prompt) => handleSendMessage(prompt)}
-              />
-            )}
+              {activeTab === 'knowledge' && (
+                <KnowledgeMapView
+                  session={activeSession}
+                  isBusy={isStreaming}
+                  onSelectSubtopic={(sub) => handleSendMessage(`/explain ${sub}`)}
+                />
+              )}
 
-            {activeTab === 'commands' && (
-              <CommandsPanel
-                topic={activeSession.topic}
-                onTriggerCommand={handleTriggerCommandFromPanel}
-              />
-            )}
-          </main>
+              {activeTab === 'questions' && (
+                <QuestionGeneratorView
+                  session={activeSession}
+                  isGenerating={isGeneratingQuestions}
+                  error={questionsError}
+                  onGenerate={handleGenerateQuestions}
+                  onAskFollowUp={(prompt) => handleSendMessage(prompt)}
+                />
+              )}
+
+              {activeTab === 'sources' && (
+                <SourcesPanel
+                  topic={activeSession.topic}
+                  sources={activeSession.allSources}
+                  isBusy={isStreaming}
+                  onFetchSources={() =>
+                    handleSendMessage(`/sources ${activeSession.topic}`)
+                  }
+                />
+              )}
+
+              {activeTab === 'report' && (
+                <ReportView
+                  session={activeSession}
+                  isBusy={isStreaming}
+                  onRunCommand={(prompt) => handleSendMessage(prompt)}
+                />
+              )}
+
+              {activeTab === 'commands' && (
+                <CommandsPanel
+                  topic={activeSession.topic}
+                  onTriggerCommand={handleTriggerCommandFromPanel}
+                />
+              )}
+            </main>
+          )}
         </div>
-      )}
 
-      <HistoryDrawer
-        isOpen={isHistoryOpen}
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onClose={() => setIsHistoryOpen(false)}
-        onSelectSession={handleSelectSession}
-        onDeleteSession={handleDeleteSession}
-        onNewTopic={handleNewTopic}
-      />
-    </div>
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          settings={settings}
+          sessionCount={sessions.length}
+          onClose={() => setIsSettingsOpen(false)}
+          onUpdateSettings={handleUpdateSettings}
+          onClearAllHistory={handleClearAllHistory}
+        />
+      </div>
+    </MotionConfig>
   );
 }

@@ -53,34 +53,34 @@ export function AudioPlayerBar({
     <section
       aria-label="Audio explanation player"
       data-testid="audio-player-bar"
-      className="bg-white dark:bg-[#111827] border-b border-[#E5E2DC] dark:border-[#1E293B] px-4 sm:px-8 py-2.5 shrink-0"
+      className="bg-white/90 dark:bg-[#0F172A]/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-4 sm:px-8 py-2.5 shrink-0"
     >
       <div className="max-w-3xl mx-auto flex flex-wrap items-center justify-between gap-3">
         {/* Left: Play/Pause + Track Title */}
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {state.status === 'loading' ? (
             <div
-              className="w-8 h-8 rounded-lg bg-[#EFF6FF] dark:bg-[#1E293B] border border-[#BFDBFE] dark:border-[#3B82F6]/40 flex items-center justify-center shrink-0"
+              className="w-8 h-8 rounded-lg bg-blue-50 dark:bg-slate-800 border border-blue-200 dark:border-blue-500/40 flex items-center justify-center shrink-0"
               aria-label="Generating speech audio"
             >
               <Loader2
-                className="w-4 h-4 text-[#1E40AF] dark:text-[#60A5FA] animate-spin"
+                className="w-4 h-4 text-blue-600 dark:text-blue-400 animate-spin"
                 aria-hidden="true"
               />
             </div>
           ) : state.status === 'error' ? (
             <div
-              className="w-8 h-8 rounded-lg bg-[#FEF2F2] dark:bg-[#450A0A]/50 border border-[#FECACA] dark:border-[#991B1B] flex items-center justify-center shrink-0"
+              className="w-8 h-8 rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 flex items-center justify-center shrink-0"
               aria-hidden="true"
             >
-              <Volume2 className="w-4 h-4 text-[#B91C1C] dark:text-[#F87171]" />
+              <Volume2 className="w-4 h-4 text-red-600 dark:text-red-400" />
             </div>
           ) : (
             <button
               type="button"
               onClick={onTogglePlayPause}
               aria-label={state.status === 'playing' ? 'Pause audio' : 'Play audio'}
-              className="w-8 h-8 rounded-lg bg-[#1E40AF] hover:bg-[#1E3A8A] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-lg bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center shrink-0 transition-colors cursor-pointer"
             >
               {state.status === 'playing' ? (
                 <Pause className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
@@ -91,7 +91,7 @@ export function AudioPlayerBar({
           )}
 
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-[#111827] dark:text-[#F8FAFC] truncate">
+            <p className="text-xs font-semibold text-slate-900 dark:text-slate-50 truncate">
               {state.status === 'loading'
                 ? `Preparing audio: ${state.title}`
                 : state.status === 'error'
@@ -99,7 +99,7 @@ export function AudioPlayerBar({
                   : state.title}
             </p>
             {state.status === 'error' ? (
-              <p role="alert" className="text-[11px] text-[#B91C1C] dark:text-[#FCA5A5] truncate">
+              <p role="alert" className="text-[11px] text-red-600 dark:text-red-400 truncate">
                 {state.error}
               </p>
             ) : (
@@ -113,9 +113,9 @@ export function AudioPlayerBar({
                   value={Math.min(state.currentTime, progressMax)}
                   disabled={state.status === 'loading' || state.duration <= 0}
                   onChange={(e) => onSeek(Number(e.target.value))}
-                  className="w-full max-w-[220px] h-1.5 accent-[#1E40AF] dark:accent-[#3B82F6] cursor-pointer disabled:opacity-50"
+                  className="w-full max-w-[220px] h-1.5 accent-blue-600 dark:accent-blue-500 cursor-pointer disabled:opacity-50"
                 />
-                <span className="text-[11px] text-[#71717A] dark:text-[#94A3B8] tabular-nums whitespace-nowrap shrink-0">
+                <span className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap shrink-0">
                   {formatAudioTime(state.currentTime)} / {formatAudioTime(state.duration)}
                 </span>
               </div>
@@ -129,7 +129,7 @@ export function AudioPlayerBar({
             <button
               type="button"
               onClick={onRetry}
-              className="px-2.5 py-1 text-xs font-medium text-[#1E40AF] dark:text-[#60A5FA] bg-[#EFF6FF] dark:bg-[#1E293B] hover:bg-[#DBEAFE] dark:hover:bg-[#334155] rounded-md transition-colors whitespace-nowrap cursor-pointer"
+              className="px-2.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-slate-800 hover:bg-blue-100 dark:hover:bg-slate-700 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
             >
               Retry
             </button>
@@ -139,7 +139,7 @@ export function AudioPlayerBar({
             type="button"
             onClick={nextRate}
             aria-label={`Playback speed ${state.playbackRate}x`}
-            className="px-2 py-1 text-xs font-mono font-medium text-[#3F3F46] dark:text-[#CBD5E1] hover:text-[#111827] dark:hover:text-[#F8FAFC] bg-[#FAF9F6] dark:bg-[#0B1120] border border-[#E5E2DC] dark:border-[#1E293B] rounded-md transition-colors whitespace-nowrap tabular-nums cursor-pointer"
+            className="px-2 py-1 text-xs font-mono font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-50 bg-slate-50 dark:bg-[#0B1220] border border-slate-200 dark:border-slate-800 rounded-lg transition-colors whitespace-nowrap tabular-nums cursor-pointer"
           >
             {state.playbackRate}x
           </button>
@@ -148,7 +148,7 @@ export function AudioPlayerBar({
             aria-label="Narrator voice"
             value={state.voiceName}
             onChange={(e) => onChangeVoice(e.target.value as TtsVoiceName)}
-            className="hidden sm:block py-1 px-2 text-xs font-medium text-[#3F3F46] dark:text-[#CBD5E1] bg-[#FAF9F6] dark:bg-[#0B1120] border border-[#E5E2DC] dark:border-[#1E293B] rounded-md focus:outline-none focus:border-[#1E40AF] cursor-pointer"
+            className="hidden sm:block py-1 px-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-[#0B1220] border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-none focus:border-blue-600 cursor-pointer"
           >
             {TTS_VOICES.map((voice) => (
               <option key={voice.id} value={voice.id}>
@@ -161,7 +161,7 @@ export function AudioPlayerBar({
             <button
               type="button"
               onClick={() => onSwitchTab('knowledge')}
-              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#1E40AF] dark:text-[#60A5FA] hover:bg-[#EFF6FF] dark:hover:bg-[#1E293B] border border-[#BFDBFE] dark:border-[#3B82F6]/40 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-slate-800 border border-blue-200 dark:border-blue-500/40 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
             >
               <Map className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Browse Knowledge Map</span>
@@ -170,7 +170,7 @@ export function AudioPlayerBar({
             <button
               type="button"
               onClick={() => onSwitchTab('conversation')}
-              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#3F3F46] dark:text-[#CBD5E1] hover:bg-[#FAF9F6] dark:hover:bg-[#1E293B] border border-[#E5E2DC] dark:border-[#1E293B] rounded-md transition-colors whitespace-nowrap cursor-pointer"
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
             >
               <MessageSquare className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Back to Chat</span>
@@ -181,7 +181,7 @@ export function AudioPlayerBar({
             type="button"
             onClick={onClose}
             aria-label="Close audio player"
-            className="p-1.5 text-[#71717A] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:bg-[#F2F0EB] dark:hover:bg-[#1E293B] rounded-md transition-colors cursor-pointer"
+            className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" aria-hidden="true" />
           </button>

@@ -1,3 +1,16 @@
+import { useEffect, useRef, useState } from 'react';
+import {
+  Check,
+  ChevronDown,
+  FileDown,
+  Globe,
+  Menu,
+  PanelLeftOpen,
+  Settings,
+} from 'lucide-react';
+import { getResearchModeById, RESEARCH_MODES } from '../utils/researchModes';
+import type { ResearchModeId, TopicSession } from '../types';
+
 export type WorkspaceTab =
   | 'conversation'
   | 'knowledge'
@@ -7,110 +20,198 @@ export type WorkspaceTab =
   | 'commands';
 
 interface HeaderProps {
-  inWorkspace: boolean;
+  activeSession: TopicSession | null;
   activeTab: WorkspaceTab;
+  selectedModeId: ResearchModeId;
+  searchGrounding: boolean;
+  isSidebarCollapsed: boolean;
+  isStreaming: boolean;
+  isInitializing: boolean;
+  onExpandSidebar: () => void;
+  onOpenMobileMenu: () => void;
+  onSelectMode: (modeId: ResearchModeId) => void;
   onSelectTab: (tab: WorkspaceTab) => void;
-  onNewTopic: () => void;
-  onJumpToSection: (sectionId: string) => void;
+  onExportPdf: () => void;
+  onOpenSettings: () => void;
 }
 
 export function Header({
-  inWorkspace,
+  activeSession,
   activeTab,
+  selectedModeId,
+  searchGrounding,
+  isSidebarCollapsed,
+  isStreaming,
+  isInitializing,
+  onExpandSidebar,
+  onOpenMobileMenu,
+  onSelectMode,
   onSelectTab,
-  onNewTopic,
-  onJumpToSection,
+  onExportPdf,
+  onOpenSettings,
 }: HeaderProps) {
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const activeMode = getResearchModeById(selectedModeId);
+
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setModeMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [modeMenuOpen]);
+
+  const statusLabel = isInitializing
+    ? 'Mapping topic...'
+    : isStreaming
+      ? 'Generating...'
+      : searchGrounding
+        ? 'Search Grounded'
+        : 'Internal Knowledge';
+
   return (
-    <header className="sticky top-0 z-30 bg-[#FAF9F6]/95 dark:bg-[#0B1120]/95 backdrop-blur-sm border-b border-[#E5E2DC] dark:border-[#1E293B]">
-      <div className="max-w-[1440px] mx-auto px-4 sm:px-8 h-14 sm:h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Single text element Brand wordmark */}
+    <header className="sticky top-0 z-30 h-14 bg-white/85 dark:bg-[#060913]/85 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 px-3 sm:px-6 flex items-center justify-between gap-3 shrink-0">
+      {/* Left: Drawer/Sidebar toggle + Mode Selector */}
+      <div className="flex items-center gap-2 min-w-0">
         <button
           type="button"
-          onClick={onNewTopic}
-          className="font-display text-xl font-semibold tracking-tight text-[#111827] dark:text-[#F8FAFC] hover:text-[#1E40AF] dark:hover:text-[#60A5FA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          onClick={onOpenMobileMenu}
+          aria-label="Open navigation drawer"
+          className="md:hidden p-2 min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer shrink-0"
         >
-          Athenaeum
+          <Menu className="w-5 h-5" aria-hidden="true" />
         </button>
 
-        {/* Zone 2: 5 concise single-line text nav links */}
-        {inWorkspace ? (
-          <nav
-            aria-label="Workspace views"
-            className="hidden md:flex items-center gap-6 text-sm font-medium"
-          >
-            {(
-              [
-                { id: 'conversation', label: 'Research Chat' },
-                { id: 'knowledge', label: 'Knowledge Map' },
-                { id: 'questions', label: 'Questions' },
-                { id: 'sources', label: 'Sources' },
-                { id: 'report', label: 'Report' },
-              ] as const
-            ).map((item) => {
-              const isActive = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onSelectTab(item.id)}
-                  className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    isActive
-                      ? 'border-[#1E40AF] dark:border-[#3B82F6] text-[#111827] dark:text-[#F8FAFC]'
-                      : 'border-transparent text-[#52525B] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:border-[#D4D4D8] dark:hover:border-[#334155]'
-                  }`}
-                >
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-        ) : (
-          <nav
-            aria-label="Overview sections"
-            className="hidden md:flex items-center gap-6 text-sm font-medium"
-          >
-            <button
-              type="button"
-              onClick={() => onJumpToSection('capabilities')}
-              className="py-1 text-[#52525B] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Capabilities
-            </button>
-            <button
-              type="button"
-              onClick={() => onJumpToSection('commands')}
-              className="py-1 text-[#52525B] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Commands
-            </button>
-            <button
-              type="button"
-              onClick={() => onJumpToSection('examples')}
-              className="py-1 text-[#52525B] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Topics
-            </button>
-            <button
-              type="button"
-              onClick={() => onJumpToSection('recent-sessions')}
-              className="py-1 text-[#52525B] dark:text-[#94A3B8] hover:text-[#111827] dark:hover:text-[#F8FAFC] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              History
-            </button>
-          </nav>
-        )}
-
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center shrink-0">
+        {isSidebarCollapsed && (
           <button
             type="button"
-            onClick={inWorkspace ? onNewTopic : () => onJumpToSection('topic-input')}
-            className="px-4 py-2 text-sm font-medium text-white bg-[#1E40AF] hover:bg-[#1E3A8A] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E40AF]"
+            onClick={onExpandSidebar}
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+            className="hidden md:flex p-2 min-h-[38px] min-w-[38px] items-center justify-center text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer shrink-0"
           >
-            {inWorkspace ? 'New Topic' : 'Start Session'}
+            <PanelLeftOpen className="w-4 h-4" aria-hidden="true" />
           </button>
+        )}
+
+        {/* Research Mode Selector Dropdown */}
+        <div className="relative" ref={menuRef}>
+          <button
+            type="button"
+            onClick={() => setModeMenuOpen((prev) => !prev)}
+            aria-expanded={modeMenuOpen}
+            aria-haspopup="menu"
+            aria-label={`Research mode: ${activeMode.label}`}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] text-sm font-medium text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-[#0F1629] border border-transparent hover:border-slate-200 dark:hover:border-slate-800 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <span className="font-semibold">{activeMode.label}</span>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+          </button>
+
+          {modeMenuOpen && (
+            <div
+              role="menu"
+              aria-label="Select research mode"
+              className="absolute left-0 top-full mt-1.5 w-76 sm:w-84 bg-white dark:bg-[#0F1629] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl p-1.5 z-50"
+            >
+              {RESEARCH_MODES.map((mode) => {
+                const isSelected = mode.id === selectedModeId;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={isSelected}
+                    onClick={() => {
+                      onSelectMode(mode.id);
+                      setModeMenuOpen(false);
+                    }}
+                    className={`w-full flex items-start justify-between gap-3 px-3 py-2.5 text-left rounded-xl transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-slate-900 dark:text-slate-50'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold">{mode.label}</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                        {mode.description}
+                      </p>
+                    </div>
+                    {isSelected && (
+                      <Check
+                        className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
+
+        {activeSession && (
+          <div className="hidden lg:flex items-center gap-2 min-w-0 pl-2 border-l border-slate-200 dark:border-slate-800">
+            <span className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[260px]">
+              {activeSession.topic}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Right: Clean Research Status + Contextual Action */}
+      <div className="flex items-center gap-2.5 shrink-0">
+        {activeSession && activeTab !== 'conversation' && (
+          <button
+            type="button"
+            onClick={() => onSelectTab('conversation')}
+            className="px-3 py-1.5 min-h-[34px] text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            Back to Chat
+          </button>
+        )}
+
+        <div
+          className="hidden sm:flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap"
+          aria-live="polite"
+        >
+          <Globe
+            className={`w-3.5 h-3.5 ${
+              searchGrounding
+                ? 'text-blue-600 dark:text-blue-400'
+                : 'text-slate-400 dark:text-slate-500'
+            }`}
+            aria-hidden="true"
+          />
+          <span>{statusLabel}</span>
+        </div>
+
+        {activeSession ? (
+          <button
+            type="button"
+            onClick={onExportPdf}
+            aria-label="Export PDF report"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#0F1629] hover:bg-slate-200/80 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <FileDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <span>Export PDF</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="Open Settings"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#0F1629] hover:bg-slate-200/80 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+            <span className="hidden sm:inline">Preferences</span>
+          </button>
+        )}
       </div>
     </header>
   );

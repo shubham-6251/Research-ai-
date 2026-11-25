@@ -2,16 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Athenaeum — Universal AI Topic Expert Agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Athenaeum — Universal AI Research Assistant</title>
     <meta
       name="description"
-      content="An interactive AI Topic Research, Learning, Analysis, and Question-Answering workbench for mastering any subject with structured knowledge maps and grounded citations."
+      content="Explore anything. Understand everything. Your intelligent research companion for learning, discovery, source-grounded analysis, and deep understanding."
     />
-    <meta property="og:title" content="Athenaeum — Universal AI Topic Expert Agent" />
+    <meta property="og:title" content="Athenaeum — Universal AI Research Assistant" />
     <meta
       property="og:description"
-      content="An interactive AI Topic Research, Learning, Analysis, and Question-Answering workbench for mastering any subject with structured knowledge maps and grounded citations."
+      content="Explore anything. Understand everything. Your intelligent research companion for learning, discovery, source-grounded analysis, and deep understanding."
     />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -21,8 +21,22 @@
       href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem('athenaeum_settings_v1');
+          var theme = raw ? JSON.parse(raw).theme : 'dark';
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (theme === 'dark' || (theme === 'system' && prefersDark) || !raw) {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-[#FAF9F6] text-[#18181B] antialiased selection:bg-[#1E40AF]/15 selection:text-[#1E3A8A]">
+  <body class="bg-[#F8FAFC] dark:bg-[#060913] text-[#0F172A] dark:text-[#E6EDF7] antialiased selection:bg-blue-500/20 selection:text-blue-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -142,6 +142,7 @@ export function extractUserFriendlyError(err: unknown): { status: number; messag
 export interface RetryOptions {
   maxAttempts?: number;
   baseDelayMs?: number;
+  retryOnRateLimit?: boolean;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -153,6 +154,7 @@ export async function runWithRetry<T>(
 ): Promise<T> {
   const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
   const baseDelayMs = options.baseDelayMs ?? 800;
+  const retryOnRateLimit = Boolean(options.retryOnRateLimit);
   const sleep = options.sleep ?? defaultSleep;
 
   let lastError: unknown;
@@ -162,7 +164,10 @@ export async function runWithRetry<T>(
     } catch (err) {
       lastError = err;
       const isLast = attempt >= maxAttempts - 1;
-      if (isLast || !isTransientGeminiError(err)) {
+      const shouldRetry = retryOnRateLimit
+        ? isRateLimitOrUnavailableError(err)
+        : isTransientGeminiError(err);
+      if (isLast || !shouldRetry) {
         throw err;
       }
       const jitter = Math.floor(Math.random() * 250);

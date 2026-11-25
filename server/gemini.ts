@@ -1,11 +1,17 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { extractGroundingSources } from '../src/utils/citations';
 import { parseCommandInput, detectProblemSolvingIntent } from '../src/utils/commands';
+import {
+  buildDeveloperTurnDirective,
+  detectDeveloperIdentitySignal,
+  DEVELOPER_NAME,
+} from '../src/utils/developerIdentity';
 import { buildExpertSystemInstruction } from '../src/utils/expertPrompt';
 import { normalizeKnowledgeStructure } from '../src/utils/knowledgeTree';
 import {
   buildSearchFallbackNotice,
   extractUserFriendlyError,
+  isQuotaOrRateLimitError,
   isRateLimitOrUnavailableError,
   runWithRetry,
   shouldFallbackFromSearchGrounding,
@@ -22,6 +28,8 @@ import type {
   TopicKnowledgeStructure,
 } from '../src/types';
 
+let cachedClient: { apiKey: string; client: GoogleGenAI } | null = null;
+
 function createClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey.trim().length === 0) {
@@ -29,7 +37,10 @@ function createClient(): GoogleGenAI {
       'GEMINI_API_KEY is not configured. Please add your API key in Settings > Secrets.'
     );
   }
-  return new GoogleGenAI({
+  if (cachedClient && cachedClient.apiKey === apiKey) {
+    return cachedClient.client;
+  }
+  const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
@@ -37,6 +48,8 @@ function createClient(): GoogleGenAI {
       },
     },
   });
+  cachedClient = { apiKey, client };
+  return client;
 }
 
 export function formatGeminiError(err: unknown): { status: number; message: string } {
@@ -48,15 +61,21 @@ export async function initializeTopicKnowledge(
   level: KnowledgeLevel
 ): Promise<TopicKnowledgeStructure> {
   const ai = createClient();
+  const devSignal = detectDeveloperIdentitySignal(topic);
+  const developerContext = devSignal.triggered
+    ? `\nContext: ${DEVELOPER_NAME} is the developer and creator of Athenaeum (this AI research assistant). Frame this knowledge map around ${DEVELOPER_NAME}'s role as the creator/developer of Athenaeum and core AI research assistant architecture.`
+    : '';
 
-  const buildRequest = (model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite') =>
+  const buildRequest = (
+    model: 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen',
+    thinkingLevel: ThinkingLevel
+  ) =>
     ai.models.generateContent({
       model,
-      contents: `Analyze the topic "${topic}" comprehensively and construct a rigorous internal knowledge structure.
-Adapt the depth framing appropriately for a "${level}" learner while still capturing the full breadth of the field (from foundational principles to advanced frontiers).
-Do not restrict yourself to a narrow angle—identify all major branches, essential subtopics, key technical terminology, foundational theories/principles, and real-world applications.`,
+      contents: `Analyze the topic "${topic}" and construct a clean internal knowledge structure.
+Adapt the depth framing appropriately for a "${level}" learner while capturing major branches, subtopics, key terms, foundational theories, and applications.${developerContext}`,
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        thinkingConfig: { thinkingLevel },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -134,18 +153,24 @@ Do not restrict yourself to a narrow angle—identify all major branches, essent
 
   let response;
   try {
-    response = await runWithRetry(() => buildRequest('gemini-4-hydrogen'), {
-      maxAttempts: 2,
-      baseDelayMs: 700,
-    });
+    response = await runWithRetry(
+      () => buildRequest('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL),
+      {
+        maxAttempts: 2,
+        baseDelayMs: 400,
+      }
+    );
   } catch (err) {
     if (!isRateLimitOrUnavailableError(err)) {
       throw err;
     }
-    response = await runWithRetry(() => buildRequest('gemini-3.1-flash-lite'), {
-      maxAttempts: 2,
-      baseDelayMs: 700,
-    });
+    response = await runWithRetry(
+      () => buildRequest('gemini-4-hydrogen', ThinkingLevel.LOW),
+      {
+        maxAttempts: 2,
+        baseDelayMs: 600,
+      }
+    );
   }
 
   const text = (response.text ?? '{}').trim();
@@ -157,6 +182,27 @@ export interface ChatTurnInput {
   role: 'user' | 'assistant';
   content: string;
 }
+
+const SEARCH_FIRST_CHUNK_TIMEOUT_MS = 4500;
+const SEARCH_COOLDOWN_MS = 90_000;
+
+function raceTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(errorMessage)), ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+let searchRateLimitedUntil = 0;
 
 export async function streamTopicExpertReply(params: {
   topic: string;
@@ -194,7 +240,7 @@ export async function streamTopicExpertReply(params: {
   };
   const resolvedModeLabel = parsed.command ? parsed.modeLabel : modeLabelMap[activeMode];
 
-  const recentHistory = params.history.slice(-20).map((turn) => ({
+  const recentHistory = params.history.slice(-12).map((turn) => ({
     role: turn.role === 'assistant' ? ('model' as const) : ('user' as const),
     parts: [{ text: turn.content }],
   }));
@@ -212,6 +258,15 @@ export async function streamTopicExpertReply(params: {
     },
   ];
 
+  const developerSignal = detectDeveloperIdentitySignal(params.message);
+  const developerDirective = buildDeveloperTurnDirective(params.message);
+  // Skip slow web search round-trip for short direct developer greeting/identity turns
+  const skipSearchForGreeting =
+    developerSignal.triggered && params.message.trim().length <= 75;
+  const searchInCooldown = params.searchGrounding && Date.now() < searchRateLimitedUntil;
+  const effectiveInitialSearch =
+    skipSearchForGreeting || searchInCooldown ? false : params.searchGrounding;
+
   const useDeepThinking =
     Boolean(parsed.definition?.prefersDeepThinking) ||
     isProblemSolving ||
@@ -220,8 +275,13 @@ export async function streamTopicExpertReply(params: {
 
   let collectedSources: GroundingSource[] = [];
   let emittedAnyChunk = false;
-  let usedSearchGrounding = params.searchGrounding;
+  let usedSearchGrounding = effectiveInitialSearch;
   let searchFallback: SearchFallbackNotice | null = null;
+
+  if (searchInCooldown && !skipSearchForGreeting) {
+    searchFallback = buildSearchFallbackNotice(new Error('429 RESOURCE_EXHAUSTED'));
+    params.onFallback?.(searchFallback);
+  }
 
   const executeStream = async (options: {
     withSearch: boolean;
@@ -240,15 +300,18 @@ export async function streamTopicExpertReply(params: {
       isProblemSolving,
       fastMode: isFast,
     });
-    const systemInstruction = options.extraInstruction
-      ? `${baseInstruction}\n\n${options.extraInstruction}`
+    const combinedExtras = [developerDirective, options.extraInstruction]
+      .filter((x): x is string => Boolean(x && x.trim().length > 0))
+      .join('\n\n');
+    const systemInstruction = combinedExtras
+      ? `${baseInstruction}\n\n${combinedExtras}`
       : baseInstruction;
 
     const streamFromModel = async (
       model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite',
       thinkingLevel: ThinkingLevel
     ) => {
-      const stream = await ai.models.generateContentStream({
+      const requestPromise = ai.models.generateContentStream({
         model,
         contents,
         config: {
@@ -258,7 +321,26 @@ export async function streamTopicExpertReply(params: {
         },
       });
 
-      for await (const chunk of stream) {
+      const stream = options.withSearch
+        ? await raceTimeout(
+            requestPromise,
+            SEARCH_FIRST_CHUNK_TIMEOUT_MS,
+            '503 UNAVAILABLE: Search grounding timed out'
+          )
+        : await requestPromise;
+
+      const iterator = stream[Symbol.asyncIterator]();
+      const firstStepPromise = iterator.next();
+      let step = options.withSearch
+        ? await raceTimeout(
+            firstStepPromise,
+            SEARCH_FIRST_CHUNK_TIMEOUT_MS,
+            '503 UNAVAILABLE: Search grounding first chunk timed out'
+          )
+        : await firstStepPromise;
+
+      while (!step.done) {
+        const chunk = step.value;
         if (chunk.text) {
           emittedAnyChunk = true;
           params.onChunk(chunk.text);
@@ -276,48 +358,53 @@ export async function streamTopicExpertReply(params: {
             }
           }
         }
+        step = await iterator.next();
       }
     };
 
-    if (isFast) {
-      await runWithRetry(
-        async () => {
-          if (!emittedAnyChunk) {
-            await streamFromModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL);
-          }
-        },
-        {
-          maxAttempts: options.maxAttempts ?? 2,
-          baseDelayMs: options.baseDelayMs ?? 400,
-        }
-      );
-      return;
-    }
+    const primaryModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite' = isFast
+      ? 'gemini-3.1-flash-lite'
+      : 'gemini-4-hydrogen';
+    const primaryThinking = isFast
+      ? ThinkingLevel.MINIMAL
+      : useDeepThinking
+        ? ThinkingLevel.MEDIUM
+        : ThinkingLevel.LOW;
+    const fallbackModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite' = isFast
+      ? 'gemini-4-hydrogen'
+      : 'gemini-3.1-flash-lite';
+    const fallbackThinking = isFast ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL;
 
-    const primaryThinking = useDeepThinking ? ThinkingLevel.HIGH : ThinkingLevel.MEDIUM;
     try {
       await runWithRetry(
         async () => {
           if (!emittedAnyChunk) {
-            await streamFromModel('gemini-4-hydrogen', primaryThinking);
+            await streamFromModel(primaryModel, primaryThinking);
           }
         },
         {
-          maxAttempts: options.maxAttempts ?? 2,
-          baseDelayMs: options.baseDelayMs ?? 700,
+          maxAttempts: options.withSearch ? 1 : (options.maxAttempts ?? 1),
+          baseDelayMs: options.baseDelayMs ?? 350,
         }
       );
     } catch (err) {
+      // Never burn another API call with search still enabled — immediately bubble out so search disables!
+      if (options.withSearch) {
+        throw err;
+      }
       if (!emittedAnyChunk && isRateLimitOrUnavailableError(err)) {
+        // Brief pause before trying the alternate model RPM bucket on 429/503
+        await new Promise<void>((r) => setTimeout(r, isQuotaOrRateLimitError(err) ? 900 : 350));
         await runWithRetry(
           async () => {
             if (!emittedAnyChunk) {
-              await streamFromModel('gemini-3.1-flash-lite', ThinkingLevel.LOW);
+              await streamFromModel(fallbackModel, fallbackThinking);
             }
           },
           {
-            maxAttempts: options.maxAttempts ?? 2,
-            baseDelayMs: options.baseDelayMs ?? 500,
+            maxAttempts: 2,
+            baseDelayMs: 900,
+            retryOnRateLimit: true,
           }
         );
       } else {
@@ -328,16 +415,20 @@ export async function streamTopicExpertReply(params: {
 
   try {
     await executeStream({
-      withSearch: params.searchGrounding,
-      maxAttempts: isFast ? 1 : params.searchGrounding ? 2 : 3,
-      baseDelayMs: params.searchGrounding ? 500 : 900,
+      withSearch: effectiveInitialSearch,
+      maxAttempts: effectiveInitialSearch ? 1 : isFast ? 1 : 2,
+      baseDelayMs: 350,
+      extraInstruction: searchInCooldown
+        ? 'GROUNDING NOTICE: Live web search grounding is temporarily unavailable for this request (rate limit cooldown). Answer thoroughly from established expert knowledge, and clearly distinguish established facts from rapidly changing claims without fabricating URLs.'
+        : undefined,
     });
   } catch (err) {
     if (
-      params.searchGrounding &&
+      effectiveInitialSearch &&
       !emittedAnyChunk &&
       shouldFallbackFromSearchGrounding(err)
     ) {
+      searchRateLimitedUntil = Date.now() + SEARCH_COOLDOWN_MS;
       usedSearchGrounding = false;
       searchFallback = buildSearchFallbackNotice(err);
       collectedSources = [];
@@ -345,8 +436,8 @@ export async function streamTopicExpertReply(params: {
 
       await executeStream({
         withSearch: false,
-        maxAttempts: isFast ? 2 : 3,
-        baseDelayMs: isFast ? 400 : 900,
+        maxAttempts: 2,
+        baseDelayMs: 700,
         extraInstruction:
           'GROUNDING NOTICE: Live web search grounding is temporarily unavailable for this request (503/rate limit). Answer thoroughly from established expert knowledge, and explicitly distinguish well-established facts from rapidly changing claims, statistics, or recent developments that the user should verify against primary sources. Never fabricate URLs or pretend web browsing occurred.',
       });
@@ -374,7 +465,10 @@ export async function generateQuestionBank(params: {
   const ai = createClient();
   const focusLabel = params.focus.trim() || params.topic;
 
-  const buildRequest = (model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite') =>
+  const buildRequest = (
+    model: 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen',
+    thinkingLevel: ThinkingLevel
+  ) =>
     ai.models.generateContent({
       model,
       contents: `Generate a rigorous, domain-accurate assessment for the research topic "${params.topic}" focusing on "${focusLabel}" at "${params.difficulty}" difficulty.
@@ -387,7 +481,7 @@ Requirements:
 - 2 Long-Answer Analytical Questions (deep synthesis/design/derivation prompt, thorough modelAnswer, and 3-4 rubricPoints).
 - Plain text/readable notation without broken markup.`,
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        thinkingConfig: { thinkingLevel },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -437,18 +531,24 @@ Requirements:
 
   let response;
   try {
-    response = await runWithRetry(() => buildRequest('gemini-4-hydrogen'), {
-      maxAttempts: 2,
-      baseDelayMs: 700,
-    });
+    response = await runWithRetry(
+      () => buildRequest('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL),
+      {
+        maxAttempts: 2,
+        baseDelayMs: 400,
+      }
+    );
   } catch (err) {
     if (!isRateLimitOrUnavailableError(err)) {
       throw err;
     }
-    response = await runWithRetry(() => buildRequest('gemini-3.1-flash-lite'), {
-      maxAttempts: 2,
-      baseDelayMs: 600,
-    });
+    response = await runWithRetry(
+      () => buildRequest('gemini-4-hydrogen', ThinkingLevel.LOW),
+      {
+        maxAttempts: 2,
+        baseDelayMs: 600,
+      }
+    );
   }
 
   const text = (response.text ?? '{}').trim();

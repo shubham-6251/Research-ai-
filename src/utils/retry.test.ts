@@ -109,4 +109,23 @@ test('buildSearchFallbackNotice produces clear user-facing notices for 429 and 5
   assert.match(unavailableNotice.completedMessage, /503/i);
 });
 
+test('runWithRetry retries 429 RESOURCE_EXHAUSTED when retryOnRateLimit is enabled', async () => {
+  let calls = 0;
+  const result = await runWithRetry(
+    async () => {
+      calls++;
+      if (calls === 1) throw new Error('429 RESOURCE_EXHAUSTED');
+      return 'recovered';
+    },
+    {
+      maxAttempts: 2,
+      baseDelayMs: 50,
+      retryOnRateLimit: true,
+      sleep: async () => {},
+    }
+  );
+  assert.equal(result, 'recovered');
+  assert.equal(calls, 2);
+});
+
 
