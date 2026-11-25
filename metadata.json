@@ -1,0 +1,6 @@
+{
+  "name": "Athenaeum — Universal AI Topic Expert Agent",
+  "description": "An interactive AI Topic Research, Learning, Analysis, and Question-Answering workbench for mastering any subject with structured knowledge maps and grounded citations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
