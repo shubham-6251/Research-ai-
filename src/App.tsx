@@ -307,7 +307,7 @@ export default function App() {
       };
 
       const requestSpeed: ResponseSpeed =
-        modeOption.forcedSpeed ?? targetSession.responseSpeed ?? 'standard';
+        modeOption.forcedSpeed ?? targetSession.responseSpeed ?? 'fast';
       const requestMode = prepared.apiMode;
 
       const placeholderAssistant: ChatMessage = {
@@ -1219,7 +1219,7 @@ export default function App() {
                   <Composer
                     topic={activeSession.topic}
                     isStreaming={isStreaming}
-                    responseSpeed={activeSession.responseSpeed ?? 'standard'}
+                    responseSpeed={activeSession.responseSpeed ?? 'fast'}
                     searchGrounding={activeSession.searchGrounding}
                     selectedModeId={activeModeId}
                     onSelectMode={handleSelectMode}
@@ -1233,7 +1233,7 @@ export default function App() {
                       updateActiveSession((s) => ({
                         ...s,
                         responseSpeed:
-                          (s.responseSpeed ?? 'standard') === 'fast' ? 'standard' : 'fast',
+                          (s.responseSpeed ?? 'fast') === 'fast' ? 'standard' : 'fast',
                       }))
                     }
                     onSend={handleSendMessage}

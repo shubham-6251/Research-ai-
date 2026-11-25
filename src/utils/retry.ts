@@ -7,6 +7,7 @@ export function isTransientGeminiError(err: unknown): boolean {
     lower.includes('high demand') ||
     lower.includes('overloaded') ||
     lower.includes('temporarily unavailable') ||
+    raw.includes('TIMEOUT_') ||
     raw.includes('"code":500') ||
     raw.includes('INTERNAL') ||
     lower.includes('econnreset') ||
@@ -24,6 +25,28 @@ export function isQuotaOrRateLimitError(err: unknown): boolean {
     lower.includes('rate limit') ||
     lower.includes('quota')
   );
+}
+
+export function isDailyQuotaExceededError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lower = raw.toLowerCase();
+  return (
+    isQuotaOrRateLimitError(err) &&
+    (lower.includes('per day') ||
+      lower.includes('perday') ||
+      lower.includes('free_tier_requests') ||
+      lower.includes('free tier'))
+  );
+}
+
+export function extractRetryAfterSeconds(err: unknown): number | null {
+  const raw = err instanceof Error ? err.message : String(err);
+  const match =
+    raw.match(/retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s/i) ??
+    raw.match(/"retryDelay"\s*:\s*"([0-9]+)s"/i);
+  if (!match) return null;
+  const secs = Math.ceil(Number(match[1]));
+  return Number.isFinite(secs) && secs > 0 ? secs : null;
 }
 
 export function isRateLimitOrUnavailableError(err: unknown): boolean {
@@ -45,11 +68,11 @@ export function buildSearchFallbackNotice(err: unknown): SearchFallbackNotice {
   if (isQuotaOrRateLimitError(err)) {
     return {
       reason: 'rate_limit',
-      noteLabel: 'Live search skipped: rate limit',
+      noteLabel: 'Answered from knowledge base',
       streamingMessage:
-        'Live web search reached a rate limit for this request. Generating your response without live web search to avoid service interruption...',
+        'Live web search is unavailable under the current API quota. Generating your response from built-in knowledge without inventing URLs...',
       completedMessage:
-        'Live web search reached a rate limit for this request, so this response was generated from internal knowledge without live web search to avoid service interruption.',
+        'Live web search is unavailable under the current API quota, so this response was answered from built-in knowledge without live web search or fabricated URLs.',
     };
   }
 
@@ -78,17 +101,28 @@ export function extractUserFriendlyError(err: unknown): { status: number; messag
     };
   }
 
-  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
+  if (isDailyQuotaExceededError(err)) {
     return {
       status: 429,
       message:
-        'Rate limit or quota reached. Please wait a moment and try again, or check your quota in Settings > Secrets.',
+        'Daily Free Tier quota reached for this Gemini model. Please try again later or select a billing-enabled API key in Settings > Secrets.',
+    };
+  }
+
+  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
+    const retryAfter = extractRetryAfterSeconds(err);
+    return {
+      status: 429,
+      message: retryAfter
+        ? `Rate limit reached. Please wait ~${retryAfter}s and try again, or check your quota in Settings > Secrets.`
+        : 'Rate limit or quota reached. Please wait a moment and try again, or check your quota in Settings > Secrets.',
     };
   }
 
   if (
     raw.includes('503') ||
     raw.includes('UNAVAILABLE') ||
+    raw.includes('TIMEOUT_') ||
     raw.toLowerCase().includes('high demand')
   ) {
     return {
@@ -139,6 +173,60 @@ export function extractUserFriendlyError(err: unknown): { status: number; messag
   };
 }
 
+export type SupportedTextModel = 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen';
+
+export interface ModelCooldownTracker {
+  isInCooldown: (model: SupportedTextModel, now?: number) => boolean;
+  markRateLimited: (model: SupportedTextModel, err: unknown, now?: number) => void;
+  pickModels: (preferredPrimary: SupportedTextModel, now?: number) => SupportedTextModel[];
+}
+
+export function createModelCooldownTracker(): ModelCooldownTracker {
+  const cooldownUntil: Record<SupportedTextModel, number> = {
+    'gemini-3.1-flash-lite': 0,
+    'gemini-4-hydrogen': 0,
+  };
+
+  const isInCooldown = (model: SupportedTextModel, now = Date.now()) =>
+    now < cooldownUntil[model];
+
+  const markRateLimited = (model: SupportedTextModel, err: unknown, now = Date.now()) => {
+    if (!isQuotaOrRateLimitError(err)) return;
+    const durationMs = isDailyQuotaExceededError(err) ? 10 * 60_000 : 45_000;
+    cooldownUntil[model] = Math.max(cooldownUntil[model], now + durationMs);
+  };
+
+  const pickModels = (
+    preferredPrimary: SupportedTextModel,
+    now = Date.now()
+  ): SupportedTextModel[] => {
+    const secondary: SupportedTextModel =
+      preferredPrimary === 'gemini-3.1-flash-lite'
+        ? 'gemini-4-hydrogen'
+        : 'gemini-3.1-flash-lite';
+    const available = [preferredPrimary, secondary].filter((m) => !isInCooldown(m, now));
+    if (available.length > 0) {
+      return available;
+    }
+    // If both cooled down, prefer flash-lite first since it recovers faster
+    return ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'];
+  };
+
+  return { isInCooldown, markRateLimited, pickModels };
+}
+
+/**
+ * When primary failed with a temporary 503 and a backup model failed with 429 quota,
+ * preserve the recoverable 503 from the primary model so callers don't mask a brief spike
+ * behind an exhausted backup model's 429.
+ */
+export function preferNonQuotaError(primaryErr: unknown, fallbackErr: unknown): unknown {
+  if (isTransientGeminiError(primaryErr) && isQuotaOrRateLimitError(fallbackErr)) {
+    return primaryErr;
+  }
+  return fallbackErr;
+}
+
 export interface RetryOptions {
   maxAttempts?: number;
   baseDelayMs?: number;
@@ -165,7 +253,7 @@ export async function runWithRetry<T>(
       lastError = err;
       const isLast = attempt >= maxAttempts - 1;
       const shouldRetry = retryOnRateLimit
-        ? isRateLimitOrUnavailableError(err)
+        ? isRateLimitOrUnavailableError(err) && !isDailyQuotaExceededError(err)
         : isTransientGeminiError(err);
       if (isLast || !shouldRetry) {
         throw err;

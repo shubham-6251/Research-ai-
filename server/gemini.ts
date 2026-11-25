@@ -10,12 +10,16 @@ import { buildExpertSystemInstruction } from '../src/utils/expertPrompt';
 import { normalizeKnowledgeStructure } from '../src/utils/knowledgeTree';
 import {
   buildSearchFallbackNotice,
+  createModelCooldownTracker,
   extractUserFriendlyError,
   isQuotaOrRateLimitError,
   isRateLimitOrUnavailableError,
+  isTransientGeminiError,
+  preferNonQuotaError,
   runWithRetry,
   shouldFallbackFromSearchGrounding,
   type SearchFallbackNotice,
+  type SupportedTextModel,
 } from '../src/utils/retry';
 import { isValidTtsVoice, prepareTextForSpeech, type TtsVoiceName } from '../src/utils/ttsText';
 import { normalizeQuestionBank } from '../src/utils/questions';
@@ -29,6 +33,7 @@ import type {
 } from '../src/types';
 
 let cachedClient: { apiKey: string; client: GoogleGenAI } | null = null;
+const modelCooldowns = createModelCooldownTracker();
 
 function createClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -56,6 +61,64 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
   return extractUserFriendlyError(err);
 }
 
+async function runWithModelFallback<T>(
+  preferredPrimary: SupportedTextModel,
+  canFallback: () => boolean,
+  runForModel: (model: SupportedTextModel) => Promise<T>,
+  options?: { retryOnRateLimit?: boolean; baseDelayMs?: number }
+): Promise<T> {
+  const models = modelCooldowns.pickModels(preferredPrimary);
+  const primary = models[0];
+  const secondary = models[1];
+  const primaryMaxAttempts = secondary ? 2 : 3;
+  const baseDelayMs = options?.baseDelayMs ?? 550;
+
+  try {
+    return await runWithRetry(() => runForModel(primary), {
+      maxAttempts: primaryMaxAttempts,
+      baseDelayMs,
+      retryOnRateLimit: options?.retryOnRateLimit,
+    });
+  } catch (primaryErr) {
+    modelCooldowns.markRateLimited(primary, primaryErr);
+
+    if (!secondary || !canFallback() || !isRateLimitOrUnavailableError(primaryErr)) {
+      throw primaryErr;
+    }
+
+    try {
+      await new Promise<void>((r) =>
+        setTimeout(r, isQuotaOrRateLimitError(primaryErr) ? 450 : 300)
+      );
+      return await runWithRetry(() => runForModel(secondary), {
+        maxAttempts: 2,
+        baseDelayMs: 650,
+        retryOnRateLimit: options?.retryOnRateLimit,
+      });
+    } catch (secondaryErr) {
+      modelCooldowns.markRateLimited(secondary, secondaryErr);
+
+      // If primary only experienced a transient 503 spike and backup was quota-exhausted (429),
+      // give primary one extra recovery attempt rather than surfacing the backup's 429.
+      if (
+        canFallback() &&
+        isTransientGeminiError(primaryErr) &&
+        isQuotaOrRateLimitError(secondaryErr)
+      ) {
+        await new Promise<void>((r) => setTimeout(r, 800));
+        try {
+          return await runForModel(primary);
+        } catch (retryPrimaryErr) {
+          modelCooldowns.markRateLimited(primary, retryPrimaryErr);
+          throw preferNonQuotaError(retryPrimaryErr, secondaryErr);
+        }
+      }
+
+      throw preferNonQuotaError(primaryErr, secondaryErr);
+    }
+  }
+}
+
 export async function initializeTopicKnowledge(
   topic: string,
   level: KnowledgeLevel
@@ -66,112 +129,100 @@ export async function initializeTopicKnowledge(
     ? `\nContext: ${DEVELOPER_NAME} is the developer and creator of Athenaeum (this AI research assistant). Frame this knowledge map around ${DEVELOPER_NAME}'s role as the creator/developer of Athenaeum and core AI research assistant architecture.`
     : '';
 
-  const buildRequest = (
-    model: 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen',
-    thinkingLevel: ThinkingLevel
-  ) =>
-    ai.models.generateContent({
-      model,
-      contents: `Analyze the topic "${topic}" and construct a clean internal knowledge structure.
+  const buildRequest = (model: SupportedTextModel) =>
+    raceTimeout(
+      ai.models.generateContent({
+        model,
+        contents: `Analyze the topic "${topic}" and construct a clean internal knowledge structure.
 Adapt the depth framing appropriately for a "${level}" learner while capturing major branches, subtopics, key terms, foundational theories, and applications.${developerContext}`,
-      config: {
-        thinkingConfig: { thinkingLevel },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            topic: { type: Type.STRING, description: 'Canonical clean title of the topic' },
-            domain: {
-              type: Type.STRING,
-              description: 'Broad academic, technical, or professional discipline',
-            },
-            overview: {
-              type: Type.STRING,
-              description: '2-3 sentence authoritative overview of what the topic encompasses',
-            },
-            prerequisites: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: '3-5 helpful prerequisite concepts or foundations',
-            },
-            branches: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  summary: { type: Type.STRING },
-                  subtopics: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                },
-                required: ['title', 'summary', 'subtopics'],
+        config: {
+          ...(model === 'gemini-4-hydrogen'
+            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            : {}),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              topic: { type: Type.STRING, description: 'Canonical clean title of the topic' },
+              domain: {
+                type: Type.STRING,
+                description: 'Broad academic, technical, or professional discipline',
               },
-              description: '4-6 major branches of the topic, each with 3-5 subtopics',
-            },
-            keyTerms: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  term: { type: Type.STRING },
-                  definition: {
-                    type: Type.STRING,
-                    description:
-                      'Crisp 1-sentence plain-text definition without LaTeX dollar-sign delimiters',
-                  },
-                },
-                required: ['term', 'definition'],
+              overview: {
+                type: Type.STRING,
+                description: '2-3 sentence authoritative overview of what the topic encompasses',
               },
-              description: '6-8 essential terms with crisp 1-sentence definitions',
+              prerequisites: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3-5 helpful prerequisite concepts or foundations',
+              },
+              branches: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    summary: { type: Type.STRING },
+                    subtopics: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                    },
+                  },
+                  required: ['title', 'summary', 'subtopics'],
+                },
+                description: '4-6 major branches of the topic, each with 3-5 subtopics',
+              },
+              keyTerms: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    term: { type: Type.STRING },
+                    definition: {
+                      type: Type.STRING,
+                      description:
+                        'Crisp 1-sentence plain-text definition without LaTeX dollar-sign delimiters',
+                    },
+                  },
+                  required: ['term', 'definition'],
+                },
+                description: '6-8 essential terms with crisp 1-sentence definitions',
+              },
+              coreTheories: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3-6 foundational laws, theories, frameworks, or algorithms',
+              },
+              applications: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '3-6 real-world applications or use cases',
+              },
             },
-            coreTheories: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: '3-6 foundational laws, theories, frameworks, or algorithms',
-            },
-            applications: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: '3-6 real-world applications or use cases',
-            },
+            required: [
+              'topic',
+              'domain',
+              'overview',
+              'prerequisites',
+              'branches',
+              'keyTerms',
+              'coreTheories',
+              'applications',
+            ],
           },
-          required: [
-            'topic',
-            'domain',
-            'overview',
-            'prerequisites',
-            'branches',
-            'keyTerms',
-            'coreTheories',
-            'applications',
-          ],
         },
-      },
-    });
+      }),
+      12_000,
+      'TIMEOUT_12000MS: Topic initialization timed out'
+    );
 
-  let response;
-  try {
-    response = await runWithRetry(
-      () => buildRequest('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL),
-      {
-        maxAttempts: 2,
-        baseDelayMs: 400,
-      }
-    );
-  } catch (err) {
-    if (!isRateLimitOrUnavailableError(err)) {
-      throw err;
-    }
-    response = await runWithRetry(
-      () => buildRequest('gemini-4-hydrogen', ThinkingLevel.LOW),
-      {
-        maxAttempts: 2,
-        baseDelayMs: 600,
-      }
-    );
-  }
+  const response = await runWithModelFallback(
+    'gemini-3.1-flash-lite',
+    () => true,
+    (model) => buildRequest(model),
+    { baseDelayMs: 500 }
+  );
 
   const text = (response.text ?? '{}').trim();
   const parsed = JSON.parse(text);
@@ -184,7 +235,9 @@ export interface ChatTurnInput {
 }
 
 const SEARCH_FIRST_CHUNK_TIMEOUT_MS = 4500;
-const SEARCH_COOLDOWN_MS = 90_000;
+const NON_SEARCH_FIRST_CHUNK_TIMEOUT_MS = 8500;
+const SEARCH_RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
+const SEARCH_UNAVAILABLE_COOLDOWN_MS = 60_000;
 
 function raceTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -286,8 +339,6 @@ export async function streamTopicExpertReply(params: {
   const executeStream = async (options: {
     withSearch: boolean;
     extraInstruction?: string;
-    maxAttempts?: number;
-    baseDelayMs?: number;
   }) => {
     const baseInstruction = buildExpertSystemInstruction({
       topic: params.topic,
@@ -307,37 +358,42 @@ export async function streamTopicExpertReply(params: {
       ? `${baseInstruction}\n\n${combinedExtras}`
       : baseInstruction;
 
-    const streamFromModel = async (
-      model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite',
-      thinkingLevel: ThinkingLevel
-    ) => {
-      const requestPromise = ai.models.generateContentStream({
-        model,
-        contents,
-        config: {
-          systemInstruction,
-          thinkingConfig: { thinkingLevel },
-          ...(options.withSearch ? { tools: [{ googleSearch: {} }] } : {}),
-        },
-      });
+    const streamFromModel = async (model: SupportedTextModel) => {
+      const firstChunkTimeout = options.withSearch
+        ? SEARCH_FIRST_CHUNK_TIMEOUT_MS
+        : NON_SEARCH_FIRST_CHUNK_TIMEOUT_MS;
+      const timeoutError = options.withSearch
+        ? '503 UNAVAILABLE: Search grounding timed out'
+        : `TIMEOUT_${NON_SEARCH_FIRST_CHUNK_TIMEOUT_MS}MS: Model timed out waiting for first chunk`;
 
-      const stream = options.withSearch
-        ? await raceTimeout(
-            requestPromise,
-            SEARCH_FIRST_CHUNK_TIMEOUT_MS,
-            '503 UNAVAILABLE: Search grounding timed out'
-          )
-        : await requestPromise;
+      const config: Record<string, unknown> = {
+        systemInstruction,
+        ...(model === 'gemini-4-hydrogen'
+          ? {
+              thinkingConfig: {
+                thinkingLevel: isFast
+                  ? ThinkingLevel.LOW
+                  : useDeepThinking
+                    ? ThinkingLevel.MEDIUM
+                    : ThinkingLevel.LOW,
+              },
+            }
+          : {}),
+        ...(options.withSearch ? { tools: [{ googleSearch: {} }] } : {}),
+      };
+
+      const stream = await raceTimeout(
+        ai.models.generateContentStream({
+          model,
+          contents,
+          config,
+        }),
+        firstChunkTimeout,
+        timeoutError
+      );
 
       const iterator = stream[Symbol.asyncIterator]();
-      const firstStepPromise = iterator.next();
-      let step = options.withSearch
-        ? await raceTimeout(
-            firstStepPromise,
-            SEARCH_FIRST_CHUNK_TIMEOUT_MS,
-            '503 UNAVAILABLE: Search grounding first chunk timed out'
-          )
-        : await firstStepPromise;
+      let step = await raceTimeout(iterator.next(), firstChunkTimeout, timeoutError);
 
       while (!step.done) {
         const chunk = step.value;
@@ -362,64 +418,34 @@ export async function streamTopicExpertReply(params: {
       }
     };
 
-    const primaryModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite' = isFast
+    const preferredPrimary: SupportedTextModel = isFast
       ? 'gemini-3.1-flash-lite'
       : 'gemini-4-hydrogen';
-    const primaryThinking = isFast
-      ? ThinkingLevel.MINIMAL
-      : useDeepThinking
-        ? ThinkingLevel.MEDIUM
-        : ThinkingLevel.LOW;
-    const fallbackModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite' = isFast
-      ? 'gemini-4-hydrogen'
-      : 'gemini-3.1-flash-lite';
-    const fallbackThinking = isFast ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL;
 
-    try {
-      await runWithRetry(
-        async () => {
-          if (!emittedAnyChunk) {
-            await streamFromModel(primaryModel, primaryThinking);
-          }
-        },
-        {
-          maxAttempts: options.withSearch ? 1 : (options.maxAttempts ?? 1),
-          baseDelayMs: options.baseDelayMs ?? 350,
-        }
-      );
-    } catch (err) {
-      // Never burn another API call with search still enabled — immediately bubble out so search disables!
-      if (options.withSearch) {
-        throw err;
-      }
-      if (!emittedAnyChunk && isRateLimitOrUnavailableError(err)) {
-        // Brief pause before trying the alternate model RPM bucket on 429/503
-        await new Promise<void>((r) => setTimeout(r, isQuotaOrRateLimitError(err) ? 900 : 350));
-        await runWithRetry(
-          async () => {
-            if (!emittedAnyChunk) {
-              await streamFromModel(fallbackModel, fallbackThinking);
-            }
-          },
-          {
-            maxAttempts: 2,
-            baseDelayMs: 900,
-            retryOnRateLimit: true,
-          }
-        );
-      } else {
-        throw err;
-      }
+    // Never retry with search grounding still enabled — fail out immediately so search disables!
+    if (options.withSearch) {
+      const searchModel = modelCooldowns.pickModels(preferredPrimary)[0];
+      await streamFromModel(searchModel);
+      return;
     }
+
+    await runWithModelFallback(
+      preferredPrimary,
+      () => !emittedAnyChunk,
+      async (model) => {
+        if (!emittedAnyChunk) {
+          await streamFromModel(model);
+        }
+      },
+      { retryOnRateLimit: true, baseDelayMs: 550 }
+    );
   };
 
   try {
     await executeStream({
       withSearch: effectiveInitialSearch,
-      maxAttempts: effectiveInitialSearch ? 1 : isFast ? 1 : 2,
-      baseDelayMs: 350,
       extraInstruction: searchInCooldown
-        ? 'GROUNDING NOTICE: Live web search grounding is temporarily unavailable for this request (rate limit cooldown). Answer thoroughly from established expert knowledge, and clearly distinguish established facts from rapidly changing claims without fabricating URLs.'
+        ? 'GROUNDING NOTICE: Live web search grounding is temporarily unavailable under the current API quota. Answer thoroughly from established expert knowledge, and clearly distinguish established facts from rapidly changing claims without fabricating URLs.'
         : undefined,
     });
   } catch (err) {
@@ -428,7 +454,10 @@ export async function streamTopicExpertReply(params: {
       !emittedAnyChunk &&
       shouldFallbackFromSearchGrounding(err)
     ) {
-      searchRateLimitedUntil = Date.now() + SEARCH_COOLDOWN_MS;
+      const cooldownMs = isQuotaOrRateLimitError(err)
+        ? SEARCH_RATE_LIMIT_COOLDOWN_MS
+        : SEARCH_UNAVAILABLE_COOLDOWN_MS;
+      searchRateLimitedUntil = Date.now() + cooldownMs;
       usedSearchGrounding = false;
       searchFallback = buildSearchFallbackNotice(err);
       collectedSources = [];
@@ -436,8 +465,6 @@ export async function streamTopicExpertReply(params: {
 
       await executeStream({
         withSearch: false,
-        maxAttempts: 2,
-        baseDelayMs: 700,
         extraInstruction:
           'GROUNDING NOTICE: Live web search grounding is temporarily unavailable for this request (503/rate limit). Answer thoroughly from established expert knowledge, and explicitly distinguish well-established facts from rapidly changing claims, statistics, or recent developments that the user should verify against primary sources. Never fabricate URLs or pretend web browsing occurred.',
       });
@@ -465,13 +492,11 @@ export async function generateQuestionBank(params: {
   const ai = createClient();
   const focusLabel = params.focus.trim() || params.topic;
 
-  const buildRequest = (
-    model: 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen',
-    thinkingLevel: ThinkingLevel
-  ) =>
-    ai.models.generateContent({
-      model,
-      contents: `Generate a rigorous, domain-accurate assessment for the research topic "${params.topic}" focusing on "${focusLabel}" at "${params.difficulty}" difficulty.
+  const buildRequest = (model: SupportedTextModel) =>
+    raceTimeout(
+      ai.models.generateContent({
+        model,
+        contents: `Generate a rigorous, domain-accurate assessment for the research topic "${params.topic}" focusing on "${focusLabel}" at "${params.difficulty}" difficulty.
 Knowledge overview: ${params.knowledgeMap.overview}
 Branches: ${params.knowledgeMap.branches.map((b) => `${b.title} (${b.subtopics.join(', ')})`).join('; ')}
 
@@ -480,76 +505,66 @@ Requirements:
 - 3 Short-Answer Questions (clear prompt, concise 2-3 sentence modelAnswer, and 2-3 keyPoints).
 - 2 Long-Answer Analytical Questions (deep synthesis/design/derivation prompt, thorough modelAnswer, and 3-4 rubricPoints).
 - Plain text/readable notation without broken markup.`,
-      config: {
-        thinkingConfig: { thinkingLevel },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            mcqs: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  question: { type: Type.STRING },
-                  options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  correctIndex: { type: Type.INTEGER },
-                  explanation: { type: Type.STRING },
+        config: {
+          ...(model === 'gemini-4-hydrogen'
+            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            : {}),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              mcqs: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    question: { type: Type.STRING },
+                    options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    correctIndex: { type: Type.INTEGER },
+                    explanation: { type: Type.STRING },
+                  },
+                  required: ['question', 'options', 'correctIndex', 'explanation'],
                 },
-                required: ['question', 'options', 'correctIndex', 'explanation'],
+              },
+              shortAnswers: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    question: { type: Type.STRING },
+                    modelAnswer: { type: Type.STRING },
+                    keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['question', 'modelAnswer', 'keyPoints'],
+                },
+              },
+              longAnswers: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    question: { type: Type.STRING },
+                    modelAnswer: { type: Type.STRING },
+                    rubricPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['question', 'modelAnswer', 'rubricPoints'],
+                },
               },
             },
-            shortAnswers: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  question: { type: Type.STRING },
-                  modelAnswer: { type: Type.STRING },
-                  keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
-                },
-                required: ['question', 'modelAnswer', 'keyPoints'],
-              },
-            },
-            longAnswers: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  question: { type: Type.STRING },
-                  modelAnswer: { type: Type.STRING },
-                  rubricPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
-                },
-                required: ['question', 'modelAnswer', 'rubricPoints'],
-              },
-            },
+            required: ['mcqs', 'shortAnswers', 'longAnswers'],
           },
-          required: ['mcqs', 'shortAnswers', 'longAnswers'],
         },
-      },
-    });
+      }),
+      14_000,
+      'TIMEOUT_14000MS: Question generation timed out'
+    );
 
-  let response;
-  try {
-    response = await runWithRetry(
-      () => buildRequest('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL),
-      {
-        maxAttempts: 2,
-        baseDelayMs: 400,
-      }
-    );
-  } catch (err) {
-    if (!isRateLimitOrUnavailableError(err)) {
-      throw err;
-    }
-    response = await runWithRetry(
-      () => buildRequest('gemini-4-hydrogen', ThinkingLevel.LOW),
-      {
-        maxAttempts: 2,
-        baseDelayMs: 600,
-      }
-    );
-  }
+  const response = await runWithModelFallback(
+    'gemini-3.1-flash-lite',
+    () => true,
+    (model) => buildRequest(model),
+    { baseDelayMs: 550 }
+  );
 
   const text = (response.text ?? '{}').trim();
   const parsed = JSON.parse(text);
